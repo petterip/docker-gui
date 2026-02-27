@@ -1,0 +1,79 @@
+image: node:22
+
+options:
+  max-time: 60
+
+definitions:
+  caches:
+    pnpm: ~/.pnpm-store
+    cargo-registry: /root/.cargo/registry
+    cargo-git: /root/.cargo/git
+    cargo-target: src-tauri/target
+
+  steps:
+    - step: &frontend_build
+        name: Frontend Build
+        caches:
+          - pnpm
+        script:
+          - corepack enable
+          - corepack prepare pnpm@10 --activate
+          - pnpm install --frozen-lockfile
+          - pnpm build
+
+    - step: &rust_check
+        name: Rust Check + Clippy
+        caches:
+          - cargo-registry
+          - cargo-git
+          - cargo-target
+        script:
+          - apt-get update
+          - apt-get install -y --no-install-recommends curl build-essential pkg-config libssl-dev
+          - curl https://sh.rustup.rs -sSf | sh -s -- -y
+          - source "$HOME/.cargo/env"
+          - rustup component add clippy rustfmt
+          - cd src-tauri
+          - cargo check
+          - cargo clippy -- -D warnings
+
+    - step: &tauri_bundle_linux
+        name: Tauri Bundle (Linux)
+        caches:
+          - pnpm
+          - cargo-registry
+          - cargo-git
+          - cargo-target
+        artifacts:
+          - src-tauri/target/release/bundle/**
+        script:
+          - apt-get update
+          - apt-get install -y --no-install-recommends \
+              libwebkit2gtk-4.1-dev build-essential curl wget file \
+              libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev pkg-config
+          - curl https://sh.rustup.rs -sSf | sh -s -- -y
+          - source "$HOME/.cargo/env"
+          - corepack enable
+          - corepack prepare pnpm@10 --activate
+          - pnpm install --frozen-lockfile
+          - pnpm tauri build
+
+pipelines:
+  default:
+    - parallel:
+        - step: *frontend_build
+        - step: *rust_check
+    - step: *tauri_bundle_linux
+
+  branches:
+    main:
+      - parallel:
+          - step: *frontend_build
+          - step: *rust_check
+      - step: *tauri_bundle_linux
+
+  pull-requests:
+    '**':
+      - parallel:
+          - step: *frontend_build
+          - step: *rust_check

@@ -1,0 +1,80 @@
+<div class="view-root">
+  <!-- Toolbar -->
+  <div class="view-toolbar">
+    <input
+      class="input"
+      placeholder="Filter by tag or ID…"
+      [value]="filter()"
+      (input)="filter.set($any($event.target).value)"
+    />
+    <!-- Pull form -->
+    <div class="flex items-center gap-2 toolbar-spacer">
+      <input
+        class="input"
+        style="width: 260px;"
+        placeholder="image:tag"
+        [value]="pullName()"
+        (input)="pullName.set($any($event.target).value)"
+        (keydown.enter)="pullImage()"
+        [disabled]="pulling()"
+      />
+      <button class="btn btn-primary" [disabled]="pulling() || !pullName()" (click)="pullImage()">
+        {{ pulling() ? 'Pulling…' : 'Pull' }}
+      </button>
+    </div>
+  </div>
+
+  @if (pullProgress()) {
+    <div class="px-4 py-2" style="font-size: 12px; color: var(--text-secondary); border-bottom: 1px solid var(--border);">
+      {{ pullProgress() }}
+    </div>
+  }
+
+  <!-- Table -->
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Tag</th>
+          <th>ID</th>
+          <th>Size</th>
+          <th>Created</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (img of filteredImages(); track img.id) {
+          <tr>
+            <td>
+              <div style="font-weight: 500;">{{ displayTag(img) }}</div>
+              @if (img.repo_tags.length > 1) {
+                <div style="font-size: 11px; color: var(--text-muted);">+{{ img.repo_tags.length - 1 }} more</div>
+              }
+            </td>
+            <td style="font-family: monospace; font-size: 12px; color: var(--text-secondary);">{{ shortId(img.id) }}</td>
+            <td style="color: var(--text-secondary);">{{ formatSize(img.size) }}</td>
+            <td style="color: var(--text-muted);">{{ formatCreated(img.created) }}</td>
+            <td class="actions-cell">
+              @if (confirmRemoveId() === img.id) {
+                <app-confirm-row
+                  message="Remove image {{ displayTag(img) }}?"
+                  [options]="[]"
+                  (confirmed)="confirmRemove()"
+                  (cancelled)="cancelRemove()"
+                />
+              } @else {
+                <button class="btn btn-ghost icon-btn" title="Remove" (click)="requestRemove(img)">🗑</button>
+              }
+            </td>
+          </tr>
+        } @empty {
+          <tr>
+            <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 32px;">
+              @if (images.isPending()) { Loading… } @else { No images found }
+            </td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  </div>
+</div>

@@ -1,0 +1,60 @@
+<div class="app-layout" [attr.data-theme]="ui.theme()">
+  <header class="top-bar">
+    <div class="top-brand">
+      <span class="traffic-lights">
+        <span class="dot red"></span>
+        <span class="dot yellow"></span>
+        <span class="dot green"></span>
+      </span>
+      <span class="brand-logo">🐳</span>
+      <span class="brand-name">docker desktop</span>
+      <span class="brand-pill">PERSONAL</span>
+    </div>
+    <label class="top-search">
+      <span class="search-icon">⌕</span>
+      <input class="top-search-input" placeholder="Search" />
+    </label>
+  </header>
+
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <ul class="nav-list">
+      @for (item of navItems; track item.path) {
+        <li>
+          <a class="nav-item" [routerLink]="item.path" routerLinkActive="active">
+            <span [class]="'nav-icon icon-' + item.icon"></span>
+            <span>{{ item.label }}</span>
+          </a>
+        </li>
+      }
+    </ul>
+
+    <div class="sidebar-footer">
+      <a class="nav-item" routerLink="/settings" routerLinkActive="active">
+        <span class="nav-icon icon-settings"></span>
+        <span>Settings</span>
+      </a>
+    </div>
+  </nav>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <router-outlet />
+  </main>
+
+  <!-- Status bar -->
+  <footer class="status-bar">
+    @if (connection.isConnected()) {
+      <span class="status-dot connected"></span>
+      <span>Docker {{ connection.version() }}</span>
+      @if (connection.socketPath()) {
+        <span class="status-socket">{{ connection.socketPath() }}</span>
+      }
+    } @else {
+      <span class="status-dot disconnected"></span>
+      <span>Not connected</span>
+    }
+  </footer>
+</div>
+
+<app-toast-container />
