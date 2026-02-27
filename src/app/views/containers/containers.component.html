@@ -1,0 +1,94 @@
+<div class="view-root">
+  <!-- Toolbar -->
+  <div class="view-toolbar">
+    <input
+      class="input"
+      placeholder="Filter by name or image…"
+      [value]="filter()"
+      (input)="filter.set($any($event.target).value)"
+    />
+    <label class="checkbox-control text-sm">
+      <input type="checkbox" [checked]="showStopped()" (change)="showStopped.set($any($event.target).checked)" />
+      Show stopped
+    </label>
+    <span class="toolbar-spacer"></span>
+    @if (containers.isFetching()) {
+      <span class="text-sm" style="color: var(--text-muted);">Refreshing…</span>
+    }
+    @if (containers.isError()) {
+      <span class="text-sm" style="color: var(--status-error);">{{ containers.error() }}</span>
+    }
+  </div>
+
+  <!-- Table -->
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Image</th>
+          <th>Status</th>
+          <th>Ports</th>
+          <th>Created</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (c of filteredContainers(); track c.id) {
+          <tr [class.confirm-row]="isConfirming(c.id)" (click)="!isConfirming(c.id) && openDetail(c.id)" style="cursor: pointer;">
+            <td style="font-weight: 500;">{{ c.name }}</td>
+            <td style="color: var(--text-secondary);">{{ c.image }}</td>
+            <td>
+              <span [class]="statusClass(c.state)">
+                {{ c.state }}
+              </span>
+            </td>
+            <td style="color: var(--text-secondary); font-family: monospace; font-size: 12px;">{{ formatPorts(c) }}</td>
+            <td style="color: var(--text-muted);">{{ formatCreated(c.created) }}</td>
+            <td class="actions-cell" (click)="$event.stopPropagation()">
+              @if (isConfirming(c.id)) {
+                <app-confirm-row
+                  [message]="confirmMessage()"
+                  [options]="confirmOptions()"
+                  (confirmed)="confirmAction($event)"
+                  (cancelled)="cancelConfirm()"
+                />
+              } @else {
+                <div class="action-group">
+                  @if (c.state === 'running' || c.state === 'restarting') {
+                    <button class="btn btn-ghost icon-btn" title="Stop" (click)="requestStop(c)">■</button>
+                    <button class="btn btn-ghost icon-btn" title="Restart" (click)="restart.mutate(c.id)">↺</button>
+                  }
+                  @if (c.state !== 'running' && c.state !== 'restarting') {
+                    <button class="btn btn-ghost icon-btn" title="Start" (click)="start.mutate(c.id)">▶</button>
+                    <button class="btn btn-ghost icon-btn" title="Remove" (click)="requestRemove(c)">🗑</button>
+                  }
+                  <button class="btn btn-ghost icon-btn" title="Logs / Details" (click)="openDetail(c.id)">⋯</button>
+                </div>
+              }
+            </td>
+          </tr>
+        } @empty {
+          <tr>
+            <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 32px;">
+              @if (containers.isPending()) {
+                Loading…
+              } @else {
+                No containers found
+              }
+            </td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Slide-over detail panel -->
+@if (selectedContainer(); as container) {
+  <div class="slide-over-backdrop" (click)="closeDetail()"></div>
+  <app-container-detail
+    [container]="container"
+    (closed)="closeDetail()"
+  />
+}

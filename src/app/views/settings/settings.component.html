@@ -1,0 +1,81 @@
+<div class="flex flex-col h-full overflow-auto">
+  <div class="px-6 py-4" style="max-width: 640px;">
+    <h2 style="font-size: 18px; font-weight: 600; margin-bottom: 20px;">Settings</h2>
+
+    <!-- Appearance -->
+    <section class="settings-section">
+      <h3 class="settings-heading">Appearance</h3>
+      <div class="flex gap-3">
+        <button
+          class="btn"
+          [class.btn-primary]="ui.theme() === 'dark'"
+          [class.btn-ghost]="ui.theme() !== 'dark'"
+          (click)="setTheme('dark')"
+        >Dark</button>
+        <button
+          class="btn"
+          [class.btn-primary]="ui.theme() === 'light'"
+          [class.btn-ghost]="ui.theme() !== 'light'"
+          (click)="setTheme('light')"
+        >Light</button>
+      </div>
+    </section>
+
+    <!-- Connection -->
+    <section class="settings-section">
+      <h3 class="settings-heading">Docker Connection</h3>
+
+      <dl class="detail-grid">
+        <dt>Status</dt>
+        <dd>
+          @if (connection.isConnected()) {
+            <span class="badge badge-running">Connected</span>
+          } @else {
+            <span class="badge badge-stopped">Disconnected</span>
+          }
+        </dd>
+
+        @if (connection.socketPath()) {
+          <dt>Socket</dt>
+          <dd style="font-family: monospace; font-size: 12px;">{{ connection.socketPath() }}</dd>
+        }
+
+        @if (connection.version()) {
+          <dt>Docker version</dt>
+          <dd>{{ connection.version() }}</dd>
+        }
+
+        @if (connection.apiVersion()) {
+          <dt>API version</dt>
+          <dd>{{ connection.apiVersion() }}</dd>
+        }
+      </dl>
+
+      <button class="btn btn-primary mt-4" [disabled]="loading()" (click)="reconnect()">
+        {{ loading() ? 'Connecting…' : 'Reconnect' }}
+      </button>
+    </section>
+
+    <!-- Docker info -->
+    <section class="settings-section">
+      <h3 class="settings-heading">Docker Info</h3>
+
+      @if (loading() && !info()) {
+        <div style="color: var(--text-muted);">Loading…</div>
+      } @else if (infoError()) {
+        <div style="color: var(--status-error);">{{ infoError() }}</div>
+      } @else if (info(); as i) {
+        <dl class="detail-grid">
+          <dt>OS</dt>
+          <dd>{{ i.os }} / {{ i.arch }}</dd>
+
+          <dt>Containers</dt>
+          <dd>{{ i.containers }} total — {{ i.containers_running }} running</dd>
+
+          <dt>Images</dt>
+          <dd>{{ i.images }}</dd>
+        </dl>
+      }
+    </section>
+  </div>
+</div>

@@ -1,0 +1,85 @@
+<div class="view-root">
+  <!-- Toolbar -->
+  <div class="view-toolbar">
+    <input
+      class="input"
+      placeholder="Filter by name…"
+      [value]="filter()"
+      (input)="filter.set($any($event.target).value)"
+    />
+    <button class="btn btn-primary toolbar-spacer" (click)="showCreate.set(!showCreate())">+ New Volume</button>
+  </div>
+
+  <!-- Create form -->
+  @if (showCreate()) {
+    <div class="view-toolbar" style="background: var(--bg-elevated); min-height: 0;">
+      <input
+        class="input"
+        style="width: 260px;"
+        placeholder="Volume name"
+        [value]="newVolumeName()"
+        (input)="newVolumeName.set($any($event.target).value)"
+        (keydown.enter)="submitCreate()"
+        autofocus
+      />
+      <button class="btn btn-primary" [disabled]="!newVolumeName() || create.isPending()" (click)="submitCreate()">Create</button>
+      <button class="btn btn-ghost" (click)="showCreate.set(false)">Cancel</button>
+    </div>
+  }
+
+  <!-- Table -->
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Driver</th>
+          <th>Mountpoint</th>
+          <th>In use</th>
+          <th>Created</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (v of filteredVolumes(); track v.name) {
+          <tr>
+            <td style="font-weight: 500; font-family: monospace; font-size: 12px;">{{ v.name }}</td>
+            <td style="color: var(--text-secondary);">{{ v.driver }}</td>
+            <td style="color: var(--text-muted); font-size: 11px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ v.mount_point }}</td>
+            <td>
+              @if (v.in_use) {
+                <span class="badge badge-running">yes</span>
+              } @else {
+                <span class="badge badge-exited">no</span>
+              }
+            </td>
+            <td style="color: var(--text-muted);">{{ v.created_at ?? '—' }}</td>
+            <td class="actions-cell">
+              @if (confirmRemoveId() === v.name) {
+                <app-confirm-row
+                  [message]="'Remove volume ' + v.name + '?'"
+                  [options]="[]"
+                  (confirmed)="confirmRemove()"
+                  (cancelled)="cancelRemove()"
+                />
+              } @else {
+                <button
+                  class="btn btn-ghost icon-btn"
+                  title="Remove"
+                  [disabled]="v.in_use"
+                  (click)="!v.in_use && requestRemove(v)"
+                >🗑</button>
+              }
+            </td>
+          </tr>
+        } @empty {
+          <tr>
+            <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 32px;">
+              @if (volumes.isPending()) { Loading… } @else { No volumes found }
+            </td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  </div>
+</div>

@@ -1,0 +1,90 @@
+<div class="view-root">
+  <!-- Header -->
+  <div class="view-toolbar">
+    <h2 style="font-weight: 600;">Compose Stacks</h2>
+    @if (stacks.isFetching()) {
+      <span class="ml-3 text-sm" style="color: var(--text-muted);">Refreshing…</span>
+    }
+  </div>
+
+  <!-- Stack list -->
+  <div class="table-wrap">
+    @for (stack of stacks.data() ?? []; track stack.id) {
+      <div class="stack-item border-b" style="border-color: var(--border);">
+        <!-- Stack header row -->
+        <div
+          class="flex items-center gap-3 px-4 py-3"
+          style="cursor: pointer;"
+          (click)="toggle(stack)"
+        >
+          <span style="font-size: 10px; transition: transform 0.15s;" [style.transform]="expandedId() === stack.id ? 'rotate(90deg)' : ''">▶</span>
+          <span style="font-weight: 600; flex: 1;">{{ stack.name }}</span>
+          <span [class]="statusClass(stack.status)">{{ stack.status }}</span>
+          <div class="action-group" (click)="$event.stopPropagation()">
+            <button class="btn btn-ghost icon-btn" title="Up" (click)="up.mutate(stack.id)" [disabled]="up.isPending() || isAutoDiscovered(stack.id)">▶</button>
+            <button class="btn btn-ghost icon-btn" title="Down" (click)="down.mutate(stack.id)" [disabled]="down.isPending() || isAutoDiscovered(stack.id)">■</button>
+            <button class="btn btn-ghost icon-btn" title="Restart" (click)="restart.mutate(stack.id)" [disabled]="restart.isPending() || isAutoDiscovered(stack.id)">↺</button>
+            <button class="btn btn-ghost icon-btn" title="Logs" (click)="openLogs(stack)">🗒</button>
+          </div>
+        </div>
+
+        <!-- Expanded services table -->
+        @if (expandedId() === stack.id && stack.services.length) {
+          <div class="px-8 pb-3">
+            <table class="data-table" style="font-size: 12px;">
+              <thead>
+                <tr>
+                  <th>Service</th>
+                  <th>Image</th>
+                  <th>Status</th>
+                  <th>Replicas</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (svc of stack.services; track svc.name) {
+                  <tr>
+                    <td style="font-weight: 500;">{{ svc.name }}</td>
+                    <td style="color: var(--text-secondary);">{{ svc.image }}</td>
+                    <td><span [class]="statusClass(svc.status)">{{ svc.status }}</span></td>
+                    <td style="color: var(--text-secondary);">{{ svc.status }}</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        }
+      </div>
+    } @empty {
+      <div style="text-align: center; color: var(--text-muted); padding: 48px;">
+        @if (stacks.isPending()) {
+          Loading…
+        } @else {
+          No compose stacks found
+        }
+      </div>
+    }
+  </div>
+
+  <!-- Log panel -->
+  @if (activeLogStackId()) {
+    <div style="height: 280px; display: flex; flex-direction: column; border-top: 1px solid var(--border);">
+      <div class="flex items-center gap-2 px-4 py-2 border-b" style="border-color: var(--border);">
+        <span style="font-weight: 600; font-size: 13px;">Logs — {{ activeLogStackId() }}</span>
+        <label class="flex items-center gap-2 text-sm ml-auto" style="color: var(--text-secondary);">
+          <input type="checkbox" [checked]="logStore.autoScroll()" (change)="logStore.autoScroll.set($any($event.target).checked)" />
+          Auto-scroll
+        </label>
+        <button class="btn btn-ghost" style="font-size: 12px;" (click)="logStore.clear()">Clear</button>
+        <button class="btn btn-ghost" style="font-size: 12px;" (click)="closeLogs()">✕</button>
+      </div>
+      <div class="log-viewer flex-1">
+        @for (line of logStore.lines(); track $index) {
+          <div [class]="'log-line log-' + line.stream">
+            <span class="log-src">{{ line.stream }}</span>
+            <span>{{ line.text }}</span>
+          </div>
+        }
+      </div>
+    </div>
+  }
+</div>
