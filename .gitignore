@@ -10,6 +10,7 @@
 /node_modules
 npm-debug.log
 yarn-error.log
+.pnpm-debug.log
 
 # IDEs and editors
 .idea/
@@ -39,16 +40,24 @@ testem.log
 /typings
 __screenshots__/
 
+# Rust / Tauri
+/src-tauri/target/
+/src-tauri/gen/
+target/
+
 # System files
 .DS_Store
 Thumbs.db
 
-# Rust / Tauri
-/src-tauri/target/
-/src-tauri/gen/
+# Applications
+*.app
+*.exe
+*.war
 
-# pnpm
-.pnpm-debug.log
-
-# macOS
-.DS_Store
+# Large media files
+*.mp4
+*.tiff
+*.avi
+*.flv
+*.mov
+*.wmv
