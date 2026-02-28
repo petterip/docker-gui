@@ -107,15 +107,18 @@ fn resolve_socket_path() -> Result<String, AppError> {
         }
     }
 
-    // 3. Standard fallback (Linux / macOS fallback / WSL 2)
-    let default = "/var/run/docker.sock";
-    if std::path::Path::new(default).exists() {
-        return Ok(default.to_string());
-    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 3. Standard fallback (Linux / macOS fallback / WSL 2)
+        let default = "/var/run/docker.sock";
+        if std::path::Path::new(default).exists() {
+            return Ok(default.to_string());
+        }
 
-    Err(AppError::SocketNotFound(
-        "No Docker socket found. Start Colima (macOS), Docker Engine (Linux/WSL), or Docker Desktop (Windows).".into(),
-    ))
+        return Err(AppError::SocketNotFound(
+            "No Docker socket found. Start Colima (macOS), Docker Engine (Linux/WSL), or Docker Desktop (Windows).".into(),
+        ));
+    }
 }
 
 fn connect_docker(socket_path: &str) -> Option<Docker> {
