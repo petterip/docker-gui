@@ -29,6 +29,60 @@ It is intended for teams that want a Docker Desktop-style daily workflow while c
 - `pnpm`
 - Rust toolchain (for Tauri desktop runs/builds)
 
+macOS users: Homebrew is the recommended package manager for installing prerequisites.
+
+### Install Rust/Cargo
+
+`cargo` is installed as part of the Rust toolchain.
+
+Windows (WSL):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+cargo --version
+```
+
+macOS (Homebrew-first):
+
+```bash
+brew install node pnpm rustup-init
+rustup-init -y
+source "$HOME/.cargo/env"
+cargo --version
+```
+
+Also install Apple command line build tools if missing:
+
+```bash
+xcode-select --install
+```
+
+Ubuntu:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+cargo --version
+```
+
+If you installed Rust in a previous shell, open a new terminal (or run `source "$HOME/.cargo/env"`) before running `pnpm tauri build`.
+
+### Linux system dependencies for Tauri (Ubuntu/WSL)
+
+Install required native packages before running Tauri build/dev commands:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  libgtk-3-dev \
+  libwebkit2gtk-4.1-dev \
+  libsoup-3.0-dev \
+  libayatana-appindicator3-dev \
+  librsvg2-dev \
+  patchelf
+```
+
 ## Quick start
 
 1. Install dependencies
@@ -87,3 +141,10 @@ scripts/dev-cycle.sh check
 
 - Compose control requires a working compose binary in `PATH`.
 - If Docker is not reachable, the app will show disconnected status and command failures until the engine is available.
+
+## Tauri config troubleshooting
+
+- Tauri v2 validates `src-tauri/tauri.conf.json` against the v2 schema.
+- `app.windows[].icon` is not valid in v2 and causes:
+  - `Additional properties are not allowed ('icon' was unexpected)`
+- Define app icons under `bundle.icon` instead (already configured in this repo).

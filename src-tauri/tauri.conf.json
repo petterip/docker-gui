@@ -14,7 +14,6 @@
     "windows": [
       {
         "title": "docker-gui",
-        "icon": "icons/icon.png",
         "width": 1200,
         "height": 800,
         "minWidth": 800,
