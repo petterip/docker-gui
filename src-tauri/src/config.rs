@@ -85,14 +85,15 @@ impl AppState {
 fn resolve_socket_path() -> Result<String, AppError> {
     // 1. DOCKER_HOST env var
     if let Ok(host) = std::env::var("DOCKER_HOST") {
-        let path = host
-            .strip_prefix("unix://")
-            .unwrap_or(&host)
-            .to_string();
-        return Ok(path);
+        return Ok(host);
     }
 
     // 2. Platform defaults
+    #[cfg(target_os = "windows")]
+    {
+        return Ok("npipe:////./pipe/docker_engine".to_string());
+    }
+
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = dirs::home_dir() {
@@ -113,13 +114,21 @@ fn resolve_socket_path() -> Result<String, AppError> {
     }
 
     Err(AppError::SocketNotFound(
-        "No Docker socket found. Start Colima (macOS) or Docker Engine (Linux/WSL).".into(),
+        "No Docker socket found. Start Colima (macOS), Docker Engine (Linux/WSL), or Docker Desktop (Windows).".into(),
     ))
 }
 
 fn connect_docker(socket_path: &str) -> Option<Docker> {
-    // bollard can connect to a named unix socket path
-    Docker::connect_with_unix(socket_path, 30, bollard::API_DEFAULT_VERSION).ok()
+    #[cfg(target_os = "windows")]
+    {
+        return Docker::connect_with_named_pipe(socket_path, 30, bollard::API_DEFAULT_VERSION).ok();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let unix_path = socket_path.strip_prefix("unix://").unwrap_or(socket_path);
+        return Docker::connect_with_unix(unix_path, 30, bollard::API_DEFAULT_VERSION).ok();
+    }
 }
 
 fn resolve_compose_binary() -> ComposeBinary {
