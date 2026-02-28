@@ -1,9 +1,12 @@
 use bollard::volume::CreateVolumeOptions;
 use bollard::volume::RemoveVolumeOptions;
 use bollard::Docker;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::process::Stdio;
@@ -15,6 +18,7 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::process::Command as TokioCommand;
 #[cfg(target_os = "windows")]
 use tokio::time::{sleep, Duration};
+use std::sync::OnceLock;
 
 #[derive(Debug, Serialize)]
 struct HelperActionResponse {
@@ -45,6 +49,8 @@ enum HelperCliCommand {
     RunRelay(RelayArgs),
 }
 
+static LOG_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+
 #[tokio::main]
 async fn main() {
     let command = match parse_args() {
@@ -63,16 +69,32 @@ async fn main() {
 
     match command {
         HelperCliCommand::RunAction(args) => {
+            init_logger(args.app_data_dir.as_deref());
+            log_helper(&format!(
+                "run-action start action={} target_provider={}",
+                args.action,
+                args.target_json
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            ));
+            let action_name = args.action.clone();
             let result = dispatch(args).await;
             match result {
-                Ok(details) => print_response(HelperActionResponse {
-                    status: "succeeded",
-                    details: Some(details),
-                    failure_class: None,
-                    message: None,
-                    retriable: None,
-                }),
+                Ok(details) => {
+                    log_helper(&format!("run-action success action={action_name}"));
+                    print_response(HelperActionResponse {
+                        status: "succeeded",
+                        details: Some(details),
+                        failure_class: None,
+                        message: None,
+                        retriable: None,
+                    })
+                }
                 Err((class, message, retriable)) => {
+                    log_helper(&format!(
+                        "run-action failed class={class} message={message} retriable={retriable}"
+                    ));
                     print_response(HelperActionResponse {
                         status: "failed",
                         details: None,
@@ -85,10 +107,17 @@ async fn main() {
             }
         }
         HelperCliCommand::RunRelay(args) => {
+            init_logger(args.app_data_dir.as_deref());
+            log_helper(&format!(
+                "run-relay start distro={} pipe={}",
+                args.distro, args.relay_pipe
+            ));
             if let Err(e) = run_relay_daemon(args).await {
+                log_helper(&format!("run-relay failed: {e}"));
                 eprintln!("{e}");
                 std::process::exit(1);
             }
+            log_helper("run-relay finished");
         }
     }
 }
@@ -159,12 +188,18 @@ fn parse_args() -> Result<HelperCliCommand, String> {
 }
 
 async fn dispatch(args: Args) -> Result<Value, (&'static str, String, bool)> {
+    log_helper(&format!(
+        "dispatch action={} target={}",
+        args.action, args.target_json
+    ));
     match args.action.as_str() {
         "host_engine_detect" => {
             let endpoint = target_endpoint(&args.target_json)?;
             if can_ping(&endpoint).await {
+                log_helper(&format!("host_engine_detect succeeded endpoint={endpoint}"));
                 Ok(serde_json::json!({ "endpoint": endpoint }))
             } else {
+                log_helper("host_engine_detect found no compatible host");
                 Err((
                     "host_not_installed",
                     "No compatible Host Engine was detected.".to_string(),
@@ -175,6 +210,9 @@ async fn dispatch(args: Args) -> Result<Value, (&'static str, String, bool)> {
         "host_compatibility_validate" => {
             let endpoint = target_endpoint(&args.target_json)?;
             validate_host_compatibility(&endpoint).await?;
+            log_helper(&format!(
+                "host_compatibility_validate succeeded endpoint={endpoint}"
+            ));
             Ok(serde_json::json!({ "endpoint": endpoint }))
         }
         "wsl_prereq_enable" => {
@@ -366,6 +404,38 @@ fn host_compose_available() -> bool {
     v1.map(|o| o.status.success()).unwrap_or(false)
 }
 
+fn init_logger(app_data_dir: Option<&str>) {
+    let _ = LOG_PATH.set(
+        app_data_dir
+            .and_then(|dir| {
+                let logs_dir = Path::new(dir).join("logs");
+                std::fs::create_dir_all(&logs_dir).ok()?;
+                Some(logs_dir.join("provisioning-helper.log"))
+            }),
+    );
+}
+
+fn log_helper(message: &str) {
+    if let Some(Some(path)) = LOG_PATH.get() {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "[{}] {}", Utc::now().to_rfc3339(), message);
+        }
+    }
+}
+
+fn log_command_failure(cmd: &str, args: &[&str], output: &std::process::Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    log_helper(&format!(
+        "command failed: {} {} exit_code={} stdout={} stderr={}",
+        cmd,
+        args.join(" "),
+        output.status.code().unwrap_or(-1),
+        stdout.trim(),
+        stderr.trim()
+    ));
+}
+
 #[cfg(target_os = "windows")]
 fn ensure_windows_wsl_prerequisites() -> Result<(), (&'static str, String, bool)> {
     if wsl_status_ok() {
@@ -420,6 +490,7 @@ fn wsl_status_ok() -> bool {
 
 #[cfg(target_os = "windows")]
 fn run_windows_command(cmd: &str, args: &[&str]) -> Result<(), (&'static str, String, bool)> {
+    log_helper(&format!("run_windows_command: {} {}", cmd, args.join(" ")));
     let output = Command::new(cmd).args(args).output().map_err(|e| {
         (
             "prereq_missing",
@@ -428,8 +499,14 @@ fn run_windows_command(cmd: &str, args: &[&str]) -> Result<(), (&'static str, St
         )
     })?;
     if output.status.success() {
+        log_helper(&format!(
+            "run_windows_command succeeded: {} exit_code={}",
+            cmd,
+            output.status.code().unwrap_or(-1)
+        ));
         return Ok(());
     }
+    log_command_failure(cmd, args, &output);
     let combined = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -490,13 +567,16 @@ fn list_wsl_distros() -> Result<Vec<String>, (&'static str, String, bool)> {
 
 #[cfg(target_os = "windows")]
 fn install_supported_wsl_distro() -> Result<(), (&'static str, String, bool)> {
+    log_helper("install_supported_wsl_distro starting");
     let output = Command::new("wsl")
         .args(["--install", "-d", "Ubuntu"])
         .output()
         .map_err(|e| ("distro_install_failed", format!("Could not install WSL distro: {e}"), false))?;
     if output.status.success() {
+        log_helper("install_supported_wsl_distro succeeded");
         return Ok(());
     }
+    log_command_failure("wsl", &["--install", "-d", "Ubuntu"], &output);
     let combined = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -514,6 +594,9 @@ fn install_supported_wsl_distro() -> Result<(), (&'static str, String, bool)> {
 
 #[cfg(target_os = "windows")]
 fn run_wsl_engine_install_script(distro: &str) -> Result<(), (&'static str, String, bool)> {
+    log_helper(&format!(
+        "run_wsl_engine_install_script start distro={distro}"
+    ));
     let script = r#"
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -546,8 +629,12 @@ docker compose version >/dev/null 2>&1 || docker-compose version >/dev/null 2>&1
             )
         })?;
     if output.status.success() {
+        log_helper(&format!(
+            "run_wsl_engine_install_script succeeded distro={distro}"
+        ));
         return Ok(());
     }
+    log_command_failure("wsl", &["-d", distro, "-u", "root", "--", "bash", "-lc", script], &output);
     Err((
         "engine_install_failed",
         "Engine package installation in WSL did not complete.".to_string(),
@@ -576,8 +663,23 @@ fn verify_wsl_engine_socket_ready(distro: &str) -> Result<(), (&'static str, Str
         .output()
         .map_err(|e| ("relay_failed", format!("Could not verify WSL socket: {e}"), true))?;
     if output.status.success() {
+        log_helper(&format!(
+            "verify_wsl_engine_socket_ready succeeded distro={distro}"
+        ));
         Ok(())
     } else {
+        log_command_failure(
+            "wsl",
+            &[
+                "-d",
+                distro,
+                "--",
+                "bash",
+                "-lc",
+                "test -S /var/run/docker.sock && docker info >/dev/null 2>&1",
+            ],
+            &output,
+        );
         Err(("relay_failed", "WSL engine socket is not ready for relay registration.".to_string(), true))
     }
 }
@@ -648,6 +750,10 @@ fn register_wsl_relay(
     distro: &str,
     relay_pipe: &str,
 ) -> Result<(), (&'static str, String, bool)> {
+    log_helper(&format!(
+        "register_wsl_relay start distro={} relay_pipe={}",
+        distro, relay_pipe
+    ));
     std::fs::create_dir_all(app_data_dir).map_err(|e| {
         (
             "relay_failed",
@@ -670,7 +776,9 @@ fn register_wsl_relay(
             format!("Could not persist relay registration metadata: {e}"),
             false,
         )
-    })
+    })?;
+    log_helper("register_wsl_relay completed");
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
