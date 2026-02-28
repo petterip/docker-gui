@@ -1,59 +1,89 @@
-# DockerGuiFrontend
+# docker-gui
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 21.2.0.
+`docker-gui` is a local desktop UI for Docker Engine (containers, images, volumes, and compose stacks).
 
-## Development server
+It is intended for teams that want a Docker Desktop-style daily workflow while connecting directly to a local Docker Engine daemon.
 
-To start a local development server, run:
+## What this replaces (and what it does not)
 
-```bash
-ng serve
-```
+`docker-gui` can replace common day-to-day Docker Desktop UI tasks:
+- Browse and manage containers
+- Pull/remove images
+- Create/remove volumes
+- View and operate compose stacks
+- Stream logs
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
+`docker-gui` does not replace all Docker Desktop platform features. It is a focused Docker Engine UI.
 
-## Code scaffolding
+## Architecture
 
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
+- Frontend: Angular
+- Desktop shell: Tauri
+- Backend runtime: Rust + Docker Engine API (`bollard`)
+- Compose operations: executed via local `docker compose` / `docker-compose` CLI
 
-```bash
-ng generate component component-name
-```
+## Prerequisites
 
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
+- Docker Engine available locally (for example via Colima on macOS, Docker Engine on Linux, or WSL Docker Engine on Windows)
+- Node.js version from `.nvmrc`
+- `pnpm`
+- Rust toolchain (for Tauri desktop runs/builds)
 
-```bash
-ng generate --help
-```
+## Quick start
 
-## Building
-
-To build the project run:
-
-```bash
-ng build
-```
-
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
-
-## Running unit tests
-
-To execute unit tests with the [Vitest](https://vitest.dev/) test runner, use the following command:
+1. Install dependencies
 
 ```bash
-ng test
+pnpm install
 ```
 
-## Running end-to-end tests
-
-For end-to-end (e2e) testing, run:
+2. Run web UI (frontend only)
 
 ```bash
-ng e2e
+pnpm run start
 ```
 
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
+3. Run desktop app (recommended for real usage)
 
-## Additional Resources
+```bash
+pnpm run tauri:dev
+```
 
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+## Build and test
+
+Build:
+
+```bash
+pnpm run build
+```
+
+Unit tests:
+
+```bash
+pnpm run test -- --watch=false
+```
+
+Or use the unified helper:
+
+```bash
+scripts/dev-cycle.sh check
+```
+
+## How to use as a Docker Desktop alternative (Engine-first)
+
+1. Start your Docker Engine (example: `colima start` on macOS).
+2. Start `docker-gui` (`pnpm run tauri:dev` for local development).
+3. Open **Settings** and verify detected Docker connection/socket path.
+4. Use **Containers / Images / Volumes / Compose** views for normal operations.
+5. Keep CLI workflows (`docker`, `docker compose`) for advanced or unsupported scenarios.
+
+## Repository structure
+
+- `src/`: Angular UI
+- `src-tauri/`: Rust/Tauri backend and Docker command integrations
+- `docs/`: architecture, implementation notes, and roadmap plans
+
+## Notes
+
+- Compose control requires a working compose binary in `PATH`.
+- If Docker is not reachable, the app will show disconnected status and command failures until the engine is available.
