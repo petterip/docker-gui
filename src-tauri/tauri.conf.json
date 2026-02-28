@@ -3,6 +3,7 @@
   "productName": "docker-gui",
   "version": "0.1.0",
   "identifier": "io.github.docker-gui",
+  "mainBinaryName": "docker-gui",
   "build": {
     "beforeDevCommand": "pnpm start",
     "devUrl": "http://localhost:4200",
