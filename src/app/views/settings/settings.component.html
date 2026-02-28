@@ -52,13 +52,6 @@
           <button
             class="btn btn-default"
             [disabled]="engineBusy() || provisioning()?.status === 'running'"
-            (click)="installProvider('host_engine')"
-          >
-            Install Host Engine
-          </button>
-          <button
-            class="btn btn-default"
-            [disabled]="engineBusy() || provisioning()?.status === 'running'"
             (click)="repairEngine()"
           >
             Fix automatically
@@ -148,8 +141,69 @@
               <div style="margin-top: 6px; font-family: monospace; font-size: 12px;">
                 Endpoint: {{ provider.endpoint || 'Not available' }}
               </div>
+              @if (provider.id === 'wsl_engine' && wslDistroSelection(); as d) {
+                <div style="margin-top: 10px; display: grid; gap: 8px;">
+                  <label style="font-size: 12px; color: var(--text-secondary); font-family: inherit;">
+                    WSL distro
+                  </label>
+                  <select
+                    class="input"
+                    style="max-width: 320px;"
+                    [value]="selectedWslDistro()"
+                    [disabled]="engineBusy() || provisioning()?.status === 'running'"
+                    (change)="onWslDistroChanged($event)"
+                  >
+                    @for (option of d.options; track option) {
+                      <option [value]="option">
+                        {{ option }}@if (d.recommended_distro === option) { (recommended) }
+                      </option>
+                    }
+                  </select>
+                  <div>
+                    <button
+                      class="btn btn-default"
+                      [disabled]="engineBusy() || provisioning()?.status === 'running' || !selectedWslDistro() || selectedWslDistro() === d.selected_distro"
+                      (click)="applyWslDistroSelection()"
+                    >
+                      Apply distro
+                    </button>
+                  </div>
+                </div>
+              }
             </details>
           </div>
+        }
+
+        @if (diagnostics(); as diag) {
+          <details
+            style="
+              margin-top: 12px;
+              border: 1px solid var(--border);
+              border-radius: var(--radius-sm);
+              padding: 10px;
+              background: color-mix(in srgb, var(--bg-elevated) 75%, transparent);
+            "
+          >
+            <summary style="cursor: pointer; color: var(--text-secondary);">View diagnostics</summary>
+            <div style="margin-top: 8px;">
+              <button class="btn btn-default" [disabled]="engineBusy()" (click)="exportDiagnostics()">
+                Export diagnostics
+              </button>
+              @if (diagnosticsExportPath()) {
+                <div style="margin-top: 6px; font-size: 12px; font-family: monospace;">
+                  Export: {{ diagnosticsExportPath() }}
+                </div>
+              }
+            </div>
+            <div style="margin-top: 8px; display: grid; gap: 6px; font-size: 12px;">
+              <div style="font-family: monospace;">Bootstrapper log: {{ diag.bootstrapper_log.path }} @if (!diag.bootstrapper_log.exists) { (not found) }</div>
+              <div style="font-family: monospace;">Helper log: {{ diag.helper_log.path }} @if (!diag.helper_log.exists) { (not found) }</div>
+              <div style="font-family: monospace;">Reconnect log: {{ diag.reconnect_log.path }} @if (!diag.reconnect_log.exists) { (not found) }</div>
+              <div style="font-family: monospace;">Engine events: {{ diag.engine_event_log.path }} @if (!diag.engine_event_log.exists) { (not found) }</div>
+              <div style="font-family: monospace;">Relay registration: {{ diag.relay_registration.path }} @if (!diag.relay_registration.exists) { (not found) }</div>
+              <div style="font-family: monospace;">Relay state: {{ diag.relay_state.path }} @if (!diag.relay_state.exists) { (not found) }</div>
+            </div>
+          </details>
         }
       } @else {
         <div style="color: var(--text-muted);">Loading engine status...</div>

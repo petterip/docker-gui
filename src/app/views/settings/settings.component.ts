@@ -4,7 +4,15 @@ import { UiStore } from '../../stores/ui.store';
 import { ConnectionStore } from '../../stores/connection.store';
 import { invoke, errorMessage } from '../../lib/tauri';
 import { ToastService } from '../../components/toast.service';
-import { DockerInfo, EngineProviderStatus, EngineStatus, ProvisioningState } from '../../lib/models';
+import {
+  DockerInfo,
+  EngineProviderStatus,
+  EngineStatus,
+  EngineDiagnostics,
+  EngineDiagnosticsExport,
+  ProvisioningState,
+  WslDistroSelection,
+} from '../../lib/models';
 
 @Component({
   selector: 'app-settings',
@@ -21,6 +29,10 @@ export class SettingsComponent implements OnInit, OnDestroy {
   infoError = signal<string | null>(null);
   engine = signal<EngineStatus | null>(null);
   provisioning = signal<ProvisioningState | null>(null);
+  wslDistroSelection = signal<WslDistroSelection | null>(null);
+  selectedWslDistro = signal<string>('');
+  diagnostics = signal<EngineDiagnostics | null>(null);
+  diagnosticsExportPath = signal<string | null>(null);
   engineError = signal<string | null>(null);
   engineBusy = signal(false);
   loading = signal(false);
@@ -38,6 +50,22 @@ export class SettingsComponent implements OnInit, OnDestroy {
       this.syncEngineStatus(engine);
     } catch (e) {
       this.engineError.set(errorMessage(e));
+    }
+
+    try {
+      const distroSelection = await invoke<WslDistroSelection>('list_wsl_engine_distros');
+      this.wslDistroSelection.set(distroSelection);
+      this.selectedWslDistro.set(distroSelection.selected_distro);
+    } catch {
+      this.wslDistroSelection.set(null);
+      this.selectedWslDistro.set('');
+    }
+
+    try {
+      const diagnostics = await invoke<EngineDiagnostics>('get_engine_diagnostics');
+      this.diagnostics.set(diagnostics);
+    } catch {
+      this.diagnostics.set(null);
     }
 
     try {
@@ -79,7 +107,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
     return 'Not installed';
   }
 
-  async installProvider(provider: 'wsl_engine' | 'host_engine'): Promise<void> {
+  async installProvider(provider: 'wsl_engine'): Promise<void> {
     const needsConsent = provider === 'wsl_engine';
     const consent =
       !needsConsent ||
@@ -93,7 +121,11 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.engineBusy.set(true);
     this.engineError.set(null);
     try {
-      const p = await invoke<ProvisioningState>('start_engine_provisioning', { provider, consent });
+      const p = await invoke<ProvisioningState>('start_engine_provisioning', {
+        provider,
+        consent,
+        source: 'settings_engine_install',
+      });
       this.provisioning.set(p);
       this.startProvisioningPoll();
       this.toast.success('Provisioning started');
@@ -126,13 +158,53 @@ export class SettingsComponent implements OnInit, OnDestroy {
   }
 
   async removeManagedEngine(): Promise<void> {
+    const consent = window.confirm(
+      'Remove managed engine will unregister the managed WSL distro and may request administrator permission. Continue?',
+    );
+    if (!consent) {
+      return;
+    }
+
     this.engineBusy.set(true);
     this.engineError.set(null);
     try {
-      const status = await invoke<EngineStatus>('remove_managed_engine');
+      const status = await invoke<EngineStatus>('remove_managed_engine', {
+        request: { remove_distro: true, consent },
+      });
       this.syncEngineStatus(status);
       await this.load();
-      this.toast.success('Managed engine removed from configuration');
+      this.toast.success('Managed engine removed');
+    } catch (e) {
+      this.engineError.set(errorMessage(e));
+      this.toast.error(errorMessage(e));
+    } finally {
+      this.engineBusy.set(false);
+    }
+  }
+
+  onWslDistroChanged(event: Event): void {
+    const target = event.target as HTMLSelectElement | null;
+    this.selectedWslDistro.set(target?.value ?? '');
+  }
+
+  async applyWslDistroSelection(): Promise<void> {
+    const distro = this.selectedWslDistro().trim();
+    if (!distro) {
+      this.toast.error('Select a WSL distro first');
+      return;
+    }
+
+    this.engineBusy.set(true);
+    this.engineError.set(null);
+    try {
+      const status = await invoke<EngineStatus>('set_wsl_engine_distro', {
+        request: { distro },
+      });
+      this.syncEngineStatus(status);
+      const distroSelection = await invoke<WslDistroSelection>('list_wsl_engine_distros');
+      this.wslDistroSelection.set(distroSelection);
+      this.selectedWslDistro.set(distroSelection.selected_distro);
+      this.toast.success('WSL distro selection updated');
     } catch (e) {
       this.engineError.set(errorMessage(e));
       this.toast.error(errorMessage(e));
@@ -155,10 +227,28 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.engineBusy.set(true);
     this.engineError.set(null);
     try {
-      const p = await invoke<ProvisioningState>('retry_engine_provisioning', { consent });
+      const p = await invoke<ProvisioningState>('retry_engine_provisioning', {
+        consent,
+        source: 'settings_engine_retry',
+      });
       this.provisioning.set(p);
       this.startProvisioningPoll();
       this.toast.success('Provisioning retried');
+    } catch (e) {
+      this.engineError.set(errorMessage(e));
+      this.toast.error(errorMessage(e));
+    } finally {
+      this.engineBusy.set(false);
+    }
+  }
+
+  async exportDiagnostics(): Promise<void> {
+    this.engineBusy.set(true);
+    this.engineError.set(null);
+    try {
+      const exported = await invoke<EngineDiagnosticsExport>('export_engine_diagnostics');
+      this.diagnosticsExportPath.set(exported.output_path);
+      this.toast.success('Diagnostics exported');
     } catch (e) {
       this.engineError.set(errorMessage(e));
       this.toast.error(errorMessage(e));

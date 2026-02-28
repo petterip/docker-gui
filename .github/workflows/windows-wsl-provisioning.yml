@@ -1,0 +1,107 @@
+name: Windows WSL Provisioning
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_provisioning:
+        description: 'Provision Azure Windows 11 VM and execute WSL provisioning checks'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      retain_vm:
+        description: 'Keep the VM after tests for manual debugging'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+env:
+  PNPM_VERSION: 10
+
+jobs:
+  build-helper:
+    if: ${{ github.event.inputs.run_provisioning == 'true' }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build provisioning helper
+        run: cargo build --bin docker-gui-provisioning-helper --release
+        working-directory: src-tauri
+
+      - name: Upload helper artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: provisioning-helper
+          path: src-tauri/target/release/docker-gui-provisioning-helper.exe
+
+  provisioning-e2e:
+    if: ${{ github.event.inputs.run_provisioning == 'true' }}
+    needs: build-helper
+    runs-on: ubuntu-latest
+    env:
+      AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+      AZURE_LOCATION: ${{ secrets.AZURE_LOCATION }}
+      WINDOWS_ADMIN_USERNAME: ${{ secrets.WINDOWS_ADMIN_USERNAME }}
+      WINDOWS_ADMIN_PASSWORD: ${{ secrets.WINDOWS_ADMIN_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download helper artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: provisioning-helper
+          path: artifacts/helper
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Provision Windows 11 lab VM
+        run: |
+          az deployment group create \
+            --resource-group "${AZURE_RESOURCE_GROUP}" \
+            --template-file infra/windows-wsl-lab.bicep \
+            --parameters adminUsername="${WINDOWS_ADMIN_USERNAME}" adminPassword="${WINDOWS_ADMIN_PASSWORD}" \
+            --parameters retainVm=${{ github.event.inputs.retain_vm }}
+
+      - name: Run WSL provisioning tests
+        run: |
+          az vm run-command invoke \
+            --resource-group "${AZURE_RESOURCE_GROUP}" \
+            --name docker-gui-wsl-lab \
+            --command-id RunPowerShellScript \
+            --scripts "powershell -ExecutionPolicy Bypass -File C:\\\\docker-gui\\\\run-windows-wsl-tests.ps1" \
+            --parameters "HelperPath=C:\\\\docker-gui\\\\docker-gui-provisioning-helper.exe" \
+                        "InstallerPath=C:\\\\docker-gui\\\\docker-gui-installer.exe"
+
+      - name: Collect logs
+        run: |
+          az vm run-command invoke \
+            --resource-group "${AZURE_RESOURCE_GROUP}" \
+            --name docker-gui-wsl-lab \
+            --command-id RunPowerShellScript \
+            --scripts "Compress-Archive -Path C:\\\\docker-gui-logs\\\\* -DestinationPath C:\\\\docker-gui-logs.zip -Force"
+          az vm run-command invoke \
+            --resource-group "${AZURE_RESOURCE_GROUP}" \
+            --name docker-gui-wsl-lab \
+            --command-id RunPowerShellScript \
+            --scripts "azcopy copy 'C:\\\\docker-gui-logs.zip' '${{ secrets.WSL_CI_LOGS_SAS_URL }}' --overwrite true"
+
+      - name: Delete resource group
+        if: ${{ github.event.inputs.retain_vm == 'false' }}
+        run: |
+          az group delete --name "${AZURE_RESOURCE_GROUP}" --yes --no-wait

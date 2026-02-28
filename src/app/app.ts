@@ -1,4 +1,4 @@
-import { Component, inject, OnInit, signal } from '@angular/core';
+import { Component, inject, OnDestroy, OnInit, signal } from '@angular/core';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { CommonModule } from '@angular/common';
 
@@ -6,7 +6,7 @@ import { ConnectionStore } from './stores/connection.store';
 import { UiStore } from './stores/ui.store';
 import { ToastContainerComponent } from './components/toast-container.component';
 import { invoke, errorMessage } from './lib/tauri';
-import { ConnectionGuidance, DockerInfo } from './lib/models';
+import { ConnectionGuidance, DockerInfo, EngineStatus, ProvisioningState } from './lib/models';
 
 @Component({
   selector: 'app-root',
@@ -14,12 +14,14 @@ import { ConnectionGuidance, DockerInfo } from './lib/models';
   imports: [CommonModule, RouterOutlet, RouterLink, RouterLinkActive, ToastContainerComponent],
   templateUrl: './app.html',
 })
-export class App implements OnInit {
+export class App implements OnInit, OnDestroy {
   connection = inject(ConnectionStore);
   ui = inject(UiStore);
   guidance = signal<ConnectionGuidance | null>(null);
   guidanceBusy = signal(false);
   limitedMode = signal(false);
+  provisioning = signal<ProvisioningState | null>(null);
+  private provisioningPoll: ReturnType<typeof setInterval> | null = null;
 
   readonly navItems = [
     { path: '/containers', label: 'Containers', icon: 'containers' },
@@ -29,6 +31,7 @@ export class App implements OnInit {
   ] as const;
 
   ngOnInit(): void { void this.bootstrap(); }
+  ngOnDestroy(): void { this.stopProvisioningPoll(); }
 
   private async bootstrap(): Promise<void> {
     try {
@@ -75,6 +78,40 @@ export class App implements OnInit {
 
     this.guidanceBusy.set(true);
     try {
+      const engine = await invoke<EngineStatus>('get_engine_status');
+      const activeProvider = engine.active_provider_id;
+      const wsl = engine.providers.find((p) => p.id === 'wsl_engine');
+      const provisioning = engine.provisioning;
+
+      if (provisioning?.status === 'running') {
+        this.provisioning.set(provisioning);
+        this.startProvisioningPoll();
+        return;
+      }
+
+      const shouldProvisionWsl =
+        !activeProvider ||
+        (activeProvider === 'wsl_engine' && !!wsl && wsl.health !== 'ready');
+
+      if (shouldProvisionWsl) {
+        if (provisioning?.status === 'failed') {
+          const resumed = await invoke<ProvisioningState>('retry_engine_provisioning', {
+            consent,
+            source: 'retry_engine_provisioning',
+          });
+          this.provisioning.set(resumed);
+        } else {
+          const started = await invoke<ProvisioningState>('start_engine_provisioning', {
+            provider: 'wsl_engine',
+            consent,
+            source: 'start_engine_provisioning',
+          });
+          this.provisioning.set(started);
+        }
+        this.startProvisioningPoll();
+        return;
+      }
+
       await invoke('repair_active_engine', { consent });
       await this.connect();
     } catch (e) {
@@ -97,6 +134,14 @@ export class App implements OnInit {
 
   private async refreshGuidance(): Promise<void> {
     try {
+      const engine = await invoke<EngineStatus>('get_engine_status');
+      this.provisioning.set(engine.provisioning);
+      if (engine.provisioning?.status === 'running') {
+        this.startProvisioningPoll();
+      } else {
+        this.stopProvisioningPoll();
+      }
+
       const data = await invoke<ConnectionGuidance>('get_connection_guidance');
       if (data.connected) {
         await this.connect();
@@ -112,5 +157,32 @@ export class App implements OnInit {
         primary_action: 'fix_automatically',
       });
     }
+  }
+
+  private startProvisioningPoll(): void {
+    if (this.provisioningPoll) return;
+    this.provisioningPoll = setInterval(async () => {
+      try {
+        const engine = await invoke<EngineStatus>('get_engine_status');
+        this.provisioning.set(engine.provisioning);
+        if (engine.provisioning?.status === 'running') {
+          return;
+        }
+        this.stopProvisioningPoll();
+        if (engine.provisioning?.status === 'succeeded') {
+          await this.connect();
+        } else {
+          await this.refreshGuidance();
+        }
+      } catch {
+        this.stopProvisioningPoll();
+      }
+    }, 1000);
+  }
+
+  private stopProvisioningPoll(): void {
+    if (!this.provisioningPoll) return;
+    clearInterval(this.provisioningPoll);
+    this.provisioningPoll = null;
   }
 }

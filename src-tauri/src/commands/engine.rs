@@ -1,9 +1,14 @@
 #![allow(dead_code, unused_variables)]
 
-#[cfg(target_os = "windows")]
 use chrono::Utc;
 use bollard::volume::{CreateVolumeOptions, RemoveVolumeOptions};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "windows")]
+use sha2::{Digest, Sha256};
+#[cfg(target_os = "windows")]
+use std::io::Read;
+#[cfg(target_os = "windows")]
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, State};
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
@@ -49,6 +54,29 @@ pub struct ConnectionGuidance {
     pub primary_action: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagnosticFile {
+    pub path: String,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EngineDiagnostics {
+    pub bootstrapper_log: DiagnosticFile,
+    pub helper_log: DiagnosticFile,
+    pub reconnect_log: DiagnosticFile,
+    pub engine_event_log: DiagnosticFile,
+    pub relay_registration: DiagnosticFile,
+    pub relay_state: DiagnosticFile,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EngineDiagnosticsExport {
+    pub output_path: String,
+    pub created_at: String,
+    pub included_files: Vec<DiagnosticFile>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct PrivilegedActionContract {
     pub version: String,
@@ -71,6 +99,7 @@ enum PrivilegedAction {
     WslDistroInstall,
     WslEngineInstall,
     WslRelayRegister,
+    WslManagedDistroRemove,
     HostEngineDetect,
     HostCompatibilityValidate,
 }
@@ -82,6 +111,7 @@ impl PrivilegedAction {
             PrivilegedAction::WslDistroInstall => "wsl_distro_install",
             PrivilegedAction::WslEngineInstall => "wsl_engine_install",
             PrivilegedAction::WslRelayRegister => "wsl_relay_register",
+            PrivilegedAction::WslManagedDistroRemove => "wsl_managed_distro_remove",
             PrivilegedAction::HostEngineDetect => "host_engine_detect",
             PrivilegedAction::HostCompatibilityValidate => "host_compatibility_validate",
         }
@@ -92,6 +122,7 @@ impl PrivilegedAction {
 #[serde(rename_all = "snake_case")]
 enum PrivilegedExecutionMode {
     HelperWithInProcessFallback,
+    HelperRequiredNoFallback,
 }
 
 impl PrivilegedExecutionMode {
@@ -100,6 +131,7 @@ impl PrivilegedExecutionMode {
             PrivilegedExecutionMode::HelperWithInProcessFallback => {
                 "helper_with_in_process_fallback"
             }
+            PrivilegedExecutionMode::HelperRequiredNoFallback => "helper_required_no_fallback",
         }
     }
 }
@@ -146,6 +178,24 @@ pub struct SetCustomHostRequest {
     pub endpoint: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SetWslDistroRequest {
+    pub distro: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveManagedEngineRequest {
+    pub remove_distro: bool,
+    pub consent: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WslDistroSelection {
+    pub selected_distro: String,
+    pub options: Vec<String>,
+    pub recommended_distro: Option<String>,
+}
+
 #[tauri::command]
 pub async fn get_engine_status(
     state: State<'_, AppState>,
@@ -154,7 +204,10 @@ pub async fn get_engine_status(
     let config = registry.get().await;
     let active_id = config.active_provider.as_ref().map(|p| p.id().to_string());
 
-    let wsl_provider = provider_for_wsl(config.active_provider.as_ref());
+    let wsl_provider = provider_for_wsl(
+        config.active_provider.as_ref(),
+        config.preferred_wsl_distro.as_deref(),
+    );
     let host_provider = provider_for_host(config.active_provider.as_ref());
 
     let providers = vec![
@@ -177,13 +230,22 @@ pub async fn install_engine_provider(
     registry: State<'_, EngineRegistry>,
     provider: InstallProviderRequest,
     consent: bool,
+    source: Option<String>,
 ) -> Result<EngineStatus, AppError> {
     let target = match provider {
-        InstallProviderRequest::WslEngine => provider_for_wsl(None),
-        InstallProviderRequest::HostEngine => provider_for_host(None),
+        InstallProviderRequest::WslEngine => {
+            let config = registry.get().await;
+            provider_for_wsl(None, config.preferred_wsl_distro.as_deref())
+        }
+        InstallProviderRequest::HostEngine => {
+            return Err(AppError::InvalidArgument(
+                "Host Engine installation is disabled by policy. Use Switch now to connect an existing compatible host, or install WSL Engine."
+                    .to_string(),
+            ))
+        }
     };
     ensure_privileged_consent_for_provider(&app, &target, consent, "install_engine_provider")?;
-    start_provisioning_run(app, state, registry, target, None).await
+    start_provisioning_run(app, state, registry, target, None, source).await
 }
 
 #[tauri::command]
@@ -197,7 +259,10 @@ pub async fn switch_active_engine(
     let previous_active = config.active_provider.clone();
 
     let target = match provider {
-        SwitchProviderRequest::WslEngine => provider_for_wsl(config.active_provider.as_ref()),
+        SwitchProviderRequest::WslEngine => provider_for_wsl(
+            config.active_provider.as_ref(),
+            config.preferred_wsl_distro.as_deref(),
+        ),
         SwitchProviderRequest::HostEngine => provider_for_host(config.active_provider.as_ref()),
         SwitchProviderRequest::CustomHost => config
             .active_provider
@@ -256,8 +321,8 @@ pub async fn repair_active_engine(
     let config = registry.get().await;
     if let Some(provider) = config.active_provider {
         ensure_privileged_consent_for_provider(&app, &provider, consent, "repair_active_engine")?;
+        #[cfg(target_os = "windows")]
         match &provider {
-            #[cfg(target_os = "windows")]
             Provider::WslEngine { distro, relay_pipe } => {
                 ensure_wsl_relay_registration_and_health(&app, distro, relay_pipe)
                     .await
@@ -268,7 +333,16 @@ pub async fn repair_active_engine(
                     .await
                     .map_err(|failure| AppError::InvalidArgument(failure.message.clone()))?;
             }
-            _ => {}
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        match &provider {
+            Provider::WslEngine { .. } => {}
+            Provider::HostEngine { endpoint, .. } | Provider::CustomHost { endpoint } => {
+                validate_host_compatibility(endpoint)
+                    .await
+                    .map_err(|failure| AppError::InvalidArgument(failure.message.clone()))?;
+            }
         }
         state
             .set_preferred_endpoint(Some(provider.endpoint()))
@@ -361,8 +435,196 @@ pub async fn set_custom_host_endpoint(
 }
 
 #[tauri::command]
+pub async fn list_wsl_engine_distros(
+    registry: State<'_, EngineRegistry>,
+) -> Result<WslDistroSelection, AppError> {
+    let config = registry.get().await;
+    let selected_distro = match config.active_provider.as_ref() {
+        Some(Provider::WslEngine { distro, .. }) => distro.clone(),
+        _ => config
+            .preferred_wsl_distro
+            .clone()
+            .or_else(discover_preferred_wsl_distro)
+            .unwrap_or_else(|| DEFAULT_WSL_DISTRO.to_string()),
+    };
+
+    #[cfg(target_os = "windows")]
+    let installed = list_wsl_distros()
+        .map_err(|failure| AppError::InvalidArgument(failure.message.clone()))?;
+    #[cfg(not(target_os = "windows"))]
+    let installed: Vec<String> = Vec::new();
+
+    let mut options = Vec::<String>::new();
+    options.push(DEFAULT_WSL_DISTRO.to_string());
+    for distro in installed {
+        if distro.eq_ignore_ascii_case(DEFAULT_WSL_DISTRO) || is_supported_ubuntu_distro(&distro) {
+            options.push(distro);
+        }
+    }
+    options.sort_unstable();
+    options.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    if !options.iter().any(|d| d.eq_ignore_ascii_case(&selected_distro)) {
+        options.push(selected_distro.clone());
+    }
+
+    let recommended_distro = options
+        .iter()
+        .find(|d| d.eq_ignore_ascii_case(DEFAULT_WSL_DISTRO))
+        .cloned()
+        .or_else(|| options.first().cloned());
+
+    Ok(WslDistroSelection {
+        selected_distro,
+        options,
+        recommended_distro,
+    })
+}
+
+#[tauri::command]
+pub async fn set_wsl_engine_distro(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    registry: State<'_, EngineRegistry>,
+    request: SetWslDistroRequest,
+) -> Result<EngineStatus, AppError> {
+    let selected = request.distro.trim();
+    if selected.is_empty() {
+        return Err(AppError::InvalidArgument(
+            "WSL distro selection cannot be empty.".to_string(),
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if !selected.eq_ignore_ascii_case(DEFAULT_WSL_DISTRO) {
+            let installed = list_wsl_distros()
+                .map_err(|failure| AppError::InvalidArgument(failure.message.clone()))?;
+            let installed_match = installed
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(selected));
+            if !installed_match {
+                return Err(AppError::InvalidArgument(
+                    "Selected WSL distro is not installed. Install it first, then retry."
+                        .to_string(),
+                ));
+            }
+            if !is_supported_ubuntu_distro(selected) {
+                return Err(AppError::InvalidArgument(
+                    "Only supported Ubuntu distros can be selected for WSL Engine."
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    registry
+        .set_preferred_wsl_distro(&app, Some(selected.to_string()))
+        .await?;
+    let config = registry.get().await;
+    if let Some(Provider::WslEngine { relay_pipe, .. }) = config.active_provider {
+        registry
+            .set_active_provider(
+                &app,
+                Provider::WslEngine {
+                    distro: selected.to_string(),
+                    relay_pipe,
+                },
+            )
+            .await?;
+        state
+            .set_preferred_endpoint(Some(MANAGED_WSL_RELAY_PIPE.to_string()))
+            .await;
+    }
+    emit_engine_event(
+        &app,
+        "wsl_distro_selected",
+        serde_json::json!({ "distro": selected }),
+    );
+
+    get_engine_status(state, registry).await
+}
+
+#[tauri::command]
+pub async fn get_engine_diagnostics(app: AppHandle) -> Result<EngineDiagnostics, AppError> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::RegistryError(e.to_string()))?;
+    let logs_dir = data_dir.join("logs");
+
+    Ok(EngineDiagnostics {
+        bootstrapper_log: diagnostic_file(logs_dir.join("bootstrapper.log")),
+        helper_log: diagnostic_file(logs_dir.join("provisioning-helper.log")),
+        reconnect_log: diagnostic_file(logs_dir.join("reconnect.log")),
+        engine_event_log: diagnostic_file(logs_dir.join("engine-events.jsonl")),
+        relay_registration: diagnostic_file(data_dir.join("wsl_relay_registration.json")),
+        relay_state: diagnostic_file(data_dir.join("wsl_relay_state.json")),
+    })
+}
+
+#[tauri::command]
+pub async fn export_engine_diagnostics(
+    app: AppHandle,
+    registry: State<'_, EngineRegistry>,
+) -> Result<EngineDiagnosticsExport, AppError> {
+    let diagnostics = get_engine_diagnostics(app.clone()).await?;
+    let config = registry.get().await;
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::RegistryError(e.to_string()))?;
+    let exports_dir = data_dir.join("diagnostics");
+    std::fs::create_dir_all(&exports_dir).map_err(|e| AppError::RegistryError(e.to_string()))?;
+
+    let created_at = Utc::now();
+    let stamp = created_at.format("%Y%m%dT%H%M%SZ").to_string();
+    let output_path = exports_dir.join(format!("engine-diagnostics-{stamp}.json"));
+    let events_tail = read_tail_lines(&diagnostics.engine_event_log.path, 200)
+        .map_err(|e| AppError::RegistryError(e.to_string()))?;
+
+    let included_files = vec![
+        diagnostics.bootstrapper_log.clone(),
+        diagnostics.helper_log.clone(),
+        diagnostics.reconnect_log.clone(),
+        diagnostics.engine_event_log.clone(),
+        diagnostics.relay_registration.clone(),
+        diagnostics.relay_state.clone(),
+    ];
+
+    let payload = serde_json::json!({
+        "created_at": created_at.to_rfc3339(),
+        "engine_registry": config,
+        "diagnostics": diagnostics,
+        "engine_event_tail": events_tail,
+    });
+
+    let content = serde_json::to_string_pretty(&payload)
+        .map_err(|e| AppError::RegistryError(e.to_string()))?;
+    std::fs::write(&output_path, content).map_err(|e| AppError::RegistryError(e.to_string()))?;
+
+    emit_engine_event(
+        &app,
+        "diagnostics_exported",
+        serde_json::json!({
+            "output_path": output_path.to_string_lossy(),
+            "included_count": included_files.iter().filter(|f| f.exists).count(),
+        }),
+    );
+
+    Ok(EngineDiagnosticsExport {
+        output_path: output_path.to_string_lossy().to_string(),
+        created_at: created_at.to_rfc3339(),
+        included_files,
+    })
+}
+
+#[tauri::command]
 pub async fn get_privileged_action_contract() -> Result<PrivilegedActionContract, AppError> {
-    let execution_mode = PrivilegedExecutionMode::HelperWithInProcessFallback;
+    let execution_mode = if helper_strict_mode_enabled() {
+        PrivilegedExecutionMode::HelperRequiredNoFallback
+    } else {
+        PrivilegedExecutionMode::HelperWithInProcessFallback
+    };
     let helper_binary = "docker-gui-provisioning-helper".to_string();
     let supported_actions = vec![
         PrivilegedActionSpec {
@@ -383,6 +645,11 @@ pub async fn get_privileged_action_contract() -> Result<PrivilegedActionContract
         PrivilegedActionSpec {
             id: PrivilegedAction::WslRelayRegister.id().to_string(),
             description: "Register and validate the managed WSL relay endpoint.".to_string(),
+            requires_elevation: true,
+        },
+        PrivilegedActionSpec {
+            id: PrivilegedAction::WslManagedDistroRemove.id().to_string(),
+            description: "Remove the managed WSL engine distro lifecycle resources.".to_string(),
             requires_elevation: true,
         },
         PrivilegedActionSpec {
@@ -410,12 +677,39 @@ pub async fn remove_managed_engine(
     app: AppHandle,
     state: State<'_, AppState>,
     registry: State<'_, EngineRegistry>,
+    request: RemoveManagedEngineRequest,
 ) -> Result<EngineStatus, AppError> {
+    if request.remove_distro {
+        let managed_provider = Provider::WslEngine {
+            distro: DEFAULT_WSL_DISTRO.to_string(),
+            relay_pipe: MANAGED_WSL_RELAY_PIPE.to_string(),
+        };
+        ensure_privileged_consent_for_provider(
+            &app,
+            &managed_provider,
+            request.consent,
+            "remove_managed_engine",
+        )?;
+        run_privileged_action(
+            &app,
+            PrivilegedAction::WslManagedDistroRemove,
+            &managed_provider,
+            "remove_managed_engine",
+        )
+        .await
+        .map_err(|failure| AppError::InvalidArgument(failure.message.clone()))?;
+    }
+
     registry.clear_managed_wsl_engine(&app).await?;
     let config = registry.get().await;
     state
         .set_preferred_endpoint(config.active_provider.map(|p| p.endpoint()))
         .await;
+    emit_engine_event(
+        &app,
+        "managed_engine_removed",
+        serde_json::json!({ "remove_distro": request.remove_distro }),
+    );
     get_engine_status(state, registry).await
 }
 
@@ -426,13 +720,22 @@ pub async fn start_engine_provisioning(
     registry: State<'_, EngineRegistry>,
     provider: InstallProviderRequest,
     consent: bool,
+    source: Option<String>,
 ) -> Result<ProvisioningState, AppError> {
     let target = match provider {
-        InstallProviderRequest::WslEngine => provider_for_wsl(None),
-        InstallProviderRequest::HostEngine => provider_for_host(None),
+        InstallProviderRequest::WslEngine => {
+            let config = registry.get().await;
+            provider_for_wsl(None, config.preferred_wsl_distro.as_deref())
+        }
+        InstallProviderRequest::HostEngine => {
+            return Err(AppError::InvalidArgument(
+                "Host Engine installation is disabled by policy. Use Switch now to connect an existing compatible host, or install WSL Engine."
+                    .to_string(),
+            ))
+        }
     };
     ensure_privileged_consent_for_provider(&app, &target, consent, "start_engine_provisioning")?;
-    let status = start_provisioning_run(app, state, registry, target, None).await?;
+    let status = start_provisioning_run(app, state, registry, target, None, source).await?;
     status
         .provisioning
         .ok_or_else(|| AppError::RegistryError("Provisioning state missing after start.".into()))
@@ -444,6 +747,7 @@ pub async fn retry_engine_provisioning(
     state: State<'_, AppState>,
     registry: State<'_, EngineRegistry>,
     consent: bool,
+    source: Option<String>,
 ) -> Result<ProvisioningState, AppError> {
     let config = registry.get().await;
     let provisioning = config
@@ -451,7 +755,10 @@ pub async fn retry_engine_provisioning(
         .ok_or_else(|| AppError::InvalidArgument("No provisioning run available to retry.".into()))?;
     let resume_checkpoint = config.resume_checkpoint.clone();
     let target = match provisioning.target_provider_id.as_str() {
-        "wsl_engine" => provider_for_wsl(config.active_provider.as_ref()),
+        "wsl_engine" => provider_for_wsl(
+            config.active_provider.as_ref(),
+            config.preferred_wsl_distro.as_deref(),
+        ),
         "host_engine" => provider_for_host(config.active_provider.as_ref()),
         _ => {
             return Err(AppError::InvalidArgument(
@@ -461,7 +768,24 @@ pub async fn retry_engine_provisioning(
     };
     ensure_privileged_consent_for_provider(&app, &target, consent, "retry_engine_provisioning")?;
 
-    let status = start_provisioning_run(app, state, registry, target, resume_checkpoint).await?;
+    emit_engine_event(
+        &app,
+        "provisioning_retry_requested",
+        serde_json::json!({
+            "resume_checkpoint": resume_checkpoint,
+            "target_provider": target.id(),
+            "source": sanitize_provisioning_source(source.as_deref()),
+        }),
+    );
+    let status = start_provisioning_run(
+        app,
+        state,
+        registry,
+        target,
+        resume_checkpoint,
+        source,
+    )
+    .await?;
     status
         .provisioning
         .ok_or_else(|| AppError::RegistryError("Provisioning state missing after retry.".into()))
@@ -505,7 +829,10 @@ pub async fn resume_engine_provisioning_if_needed(
         .as_ref()
         .map(|p| p.target_provider_id.as_str())
     {
-        Some("wsl_engine") => provider_for_wsl(config.active_provider.as_ref()),
+        Some("wsl_engine") => provider_for_wsl(
+            config.active_provider.as_ref(),
+            config.preferred_wsl_distro.as_deref(),
+        ),
         Some("host_engine") => provider_for_host(config.active_provider.as_ref()),
         Some(other) => {
             return Err(AppError::InvalidArgument(format!(
@@ -513,11 +840,26 @@ pub async fn resume_engine_provisioning_if_needed(
             )))
         }
         None => match config.active_provider.as_ref().map(|p| p.id()) {
-            Some("wsl_engine") => provider_for_wsl(config.active_provider.as_ref()),
+            Some("wsl_engine") => provider_for_wsl(
+                config.active_provider.as_ref(),
+                config.preferred_wsl_distro.as_deref(),
+            ),
             Some("host_engine") => provider_for_host(config.active_provider.as_ref()),
             _ => return Ok(None),
         },
     };
+
+    if provider_requires_elevation(&target) && !config.resume_privileged_allowed {
+        emit_engine_event(
+            &app,
+            "provisioning_resume_blocked_consent",
+            serde_json::json!({
+                "resume_checkpoint": resume_checkpoint,
+                "target_provider": target.id(),
+            }),
+        );
+        return Ok(config.provisioning);
+    }
 
     emit_engine_event(
         &app,
@@ -528,7 +870,15 @@ pub async fn resume_engine_provisioning_if_needed(
         }),
     );
     let status =
-        start_provisioning_run(app.clone(), state, registry, target, Some(resume_checkpoint)).await?;
+        start_provisioning_run(
+            app.clone(),
+            state,
+            registry,
+            target,
+            Some(resume_checkpoint),
+            Some("resume_engine_provisioning_if_needed".to_string()),
+        )
+        .await?;
     Ok(status.provisioning)
 }
 
@@ -560,7 +910,7 @@ async fn provider_status(
     }
 }
 
-fn provider_for_wsl(active: Option<&Provider>) -> Provider {
+fn provider_for_wsl(active: Option<&Provider>, preferred: Option<&str>) -> Provider {
     if let Some(Provider::WslEngine { distro, relay_pipe }) = active {
         return Provider::WslEngine {
             distro: distro.clone(),
@@ -568,8 +918,13 @@ fn provider_for_wsl(active: Option<&Provider>) -> Provider {
         };
     }
 
-    let discovered_distro =
-        discover_preferred_wsl_distro().unwrap_or_else(|| DEFAULT_WSL_DISTRO.to_string());
+    let preferred = preferred
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(ToString::to_string);
+    let discovered_distro = preferred
+        .or_else(discover_preferred_wsl_distro)
+        .unwrap_or_else(|| DEFAULT_WSL_DISTRO.to_string());
 
     Provider::WslEngine {
         distro: discovered_distro,
@@ -708,12 +1063,42 @@ fn append_engine_event(
     Ok(())
 }
 
+fn diagnostic_file(path: std::path::PathBuf) -> DiagnosticFile {
+    DiagnosticFile {
+        exists: path.exists(),
+        path: path.to_string_lossy().to_string(),
+    }
+}
+
+fn read_tail_lines(path: &str, max_lines: usize) -> Result<Vec<String>, std::io::Error> {
+    if max_lines == 0 {
+        return Ok(Vec::new());
+    }
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+
+    let mut lines = content
+        .lines()
+        .map(ToString::to_string)
+        .collect::<Vec<String>>();
+    if lines.len() > max_lines {
+        let start = lines.len() - max_lines;
+        lines = lines.split_off(start);
+    }
+    Ok(lines)
+}
+
 async fn start_provisioning_run(
     app: AppHandle,
     state: State<'_, AppState>,
     registry: State<'_, EngineRegistry>,
     target: Provider,
     start_stage: Option<String>,
+    source: Option<String>,
 ) -> Result<EngineStatus, AppError> {
     if matches!(
         registry.get().await.provisioning,
@@ -728,6 +1113,8 @@ async fn start_provisioning_run(
     }
 
     let target_provider_id = target.id().to_string();
+    let source_tag = sanitize_provisioning_source(source.as_deref()).to_string();
+    let resume_privileged_allowed = provider_requires_elevation(&target);
     let stage_ids = provisioning_stage_ids(&target);
     let start_index = match start_stage.as_deref() {
         Some(id) => stage_index(id, &stage_ids).ok_or_else(|| {
@@ -752,11 +1139,16 @@ async fn start_provisioning_run(
             "run_id": run_id,
             "target_provider_id": target_provider_id,
             "start_stage": start_stage,
+            "source": source_tag.clone(),
         }),
     );
     if let Some(first) = stage_ids.get(start_index) {
         registry
-            .set_resume_checkpoint(&app, Some((*first).to_string()))
+            .set_resume_checkpoint_with_privilege(
+                &app,
+                Some((*first).to_string()),
+                resume_privileged_allowed,
+            )
             .await?;
     }
 
@@ -765,14 +1157,20 @@ async fn start_provisioning_run(
 
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
-        let _ = run_provisioning(app_for_task, target, start_index).await;
+        let _ = run_provisioning(app_for_task, target, start_index, source_tag).await;
     });
 
     get_engine_status(state, registry).await
 }
 
-async fn run_provisioning(app: AppHandle, target: Provider, start_index: usize) -> Result<(), AppError> {
+async fn run_provisioning(
+    app: AppHandle,
+    target: Provider,
+    start_index: usize,
+    source: String,
+) -> Result<(), AppError> {
     let stage_ids = provisioning_stage_ids(&target);
+    let resume_privileged_allowed = provider_requires_elevation(&target);
     for (idx, stage_id) in stage_ids.iter().enumerate().skip(start_index) {
         emit_engine_event(
             &app,
@@ -782,18 +1180,23 @@ async fn run_provisioning(app: AppHandle, target: Provider, start_index: usize) 
         update_stage(&app, stage_id, ProvisioningStageStatus::InProgress, None, None).await?;
         if let Err(failure) = execute_stage_with_backoff(&app, &target, stage_id).await {
             let failure_message = failure.message.clone();
+            let canonical_failure_class = canonical_failure_class(failure.class);
             update_stage(
                 &app,
                 stage_id,
                 ProvisioningStageStatus::Failed,
-                Some(failure.class.to_string()),
+                Some(canonical_failure_class.to_string()),
                 Some(failure_message.clone()),
             )
             .await?;
             let registry = app.state::<EngineRegistry>();
             registry.finish_provisioning(&app, ProvisioningRunStatus::Failed).await?;
             registry
-                .set_resume_checkpoint(&app, Some(stage_id.to_string()))
+                .set_resume_checkpoint_with_privilege(
+                    &app,
+                    Some(stage_id.to_string()),
+                    resume_privileged_allowed,
+                )
                 .await?;
             emit_engine_event(
                 &app,
@@ -801,7 +1204,8 @@ async fn run_provisioning(app: AppHandle, target: Provider, start_index: usize) 
                 serde_json::json!({
                     "stage_id": stage_id,
                     "target_provider_id": target.id(),
-                    "failure_class": failure.class,
+                    "failure_class": canonical_failure_class,
+                    "raw_failure_class": failure.class,
                     "message": failure_message,
                 }),
             );
@@ -811,6 +1215,20 @@ async fn run_provisioning(app: AppHandle, target: Provider, start_index: usize) 
                 serde_json::json!({
                     "target_provider_id": target.id(),
                     "failed_stage": stage_id,
+                    "failure_class": canonical_failure_class,
+                    "raw_failure_class": failure.class,
+                    "source": &source,
+                }),
+            );
+            emit_engine_event(
+                &app,
+                "provider_install_failed",
+                serde_json::json!({
+                    "provider_id": target.id(),
+                    "failed_stage": stage_id,
+                    "failure_class": canonical_failure_class,
+                    "raw_failure_class": failure.class,
+                    "source": &source,
                 }),
             );
             return Ok(());
@@ -824,19 +1242,235 @@ async fn run_provisioning(app: AppHandle, target: Provider, start_index: usize) 
         );
         let registry = app.state::<EngineRegistry>();
         let next_checkpoint = stage_ids.get(idx + 1).map(|s| s.to_string());
-        registry.set_resume_checkpoint(&app, next_checkpoint).await?;
+        registry
+            .set_resume_checkpoint_with_privilege(
+                &app,
+                next_checkpoint,
+                resume_privileged_allowed,
+            )
+            .await?;
     }
 
     let registry = app.state::<EngineRegistry>();
+    let target_provider_id = target.id().to_string();
     registry.set_active_provider(&app, target).await?;
     registry.finish_provisioning(&app, ProvisioningRunStatus::Succeeded).await?;
     registry.set_resume_checkpoint(&app, None).await?;
     emit_engine_event(
         &app,
         "provisioning_succeeded",
-        serde_json::json!({}),
+        serde_json::json!({ "target_provider_id": target_provider_id.clone(), "source": &source }),
+    );
+    emit_engine_event(
+        &app,
+        "provider_installed",
+        serde_json::json!({
+            "provider_id": target_provider_id,
+            "source": &source,
+        }),
     );
     Ok(())
+}
+
+fn sanitize_provisioning_source(source: Option<&str>) -> &'static str {
+    match source.map(str::trim).filter(|s| !s.is_empty()) {
+        Some("settings_engine_install") => "settings_engine_install",
+        Some("settings_engine_retry") => "settings_engine_retry",
+        Some("install_engine_provider") => "install_engine_provider",
+        Some("start_engine_provisioning") => "start_engine_provisioning",
+        Some("retry_engine_provisioning") => "retry_engine_provisioning",
+        Some("resume_engine_provisioning_if_needed") => "resume_engine_provisioning_if_needed",
+        _ => "unspecified",
+    }
+}
+
+fn canonical_failure_class(raw: &str) -> &'static str {
+    match raw {
+        "prereq_missing" => "prereq_missing",
+        "reboot_required" => "reboot_required",
+        "distro_install_failed" => "distro_install_failed",
+        "engine_install_failed" => "engine_install_failed",
+        "engine_start_failed" => "engine_start_failed",
+        "relay_failed" => "relay_failed",
+        "connectivity_failed" => "connectivity_failed",
+        "permission_denied" => "connectivity_failed",
+        "host_not_installed" => "prereq_missing",
+        "host_compat_failed" => "connectivity_failed",
+        "host_policy_blocked" => "prereq_missing",
+        "helper_failed" => "connectivity_failed",
+        "distro_remove_failed" => "distro_install_failed",
+        _ => "connectivity_failed",
+    }
+}
+
+fn helper_strict_mode_enabled() -> bool {
+    if let Some(strict) = parse_bool_env("DOCKER_GUI_HELPER_STRICT") {
+        return strict;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(allow_fallback) = parse_bool_env("DOCKER_GUI_ALLOW_IN_PROCESS_FALLBACK") {
+            return !allow_fallback;
+        }
+        // Windows provisioning is expected to run helper-first in production.
+        return true;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+fn parse_bool_env(name: &str) -> Option<bool> {
+    std::env::var(name).ok().map(|v| {
+        let normalized = v.trim().to_ascii_lowercase();
+        matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_helper_binary_path(app: Option<&AppHandle>) -> Option<PathBuf> {
+    const CANDIDATE_NAMES: [&str; 2] = [
+        "docker-gui-provisioning-helper.exe",
+        "docker-gui-provisioning-helper",
+    ];
+
+    if let Ok(explicit) = std::env::var("DOCKER_GUI_HELPER_PATH") {
+        let candidate = PathBuf::from(explicit.trim());
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    if let Some(app_handle) = app {
+        if let Ok(resource_dir) = app_handle.path().resource_dir() {
+            for sub in ["bin/win32", "bin"] {
+                let base = if sub.is_empty() {
+                    resource_dir.clone()
+                } else {
+                    resource_dir.join(sub)
+                };
+                for file in CANDIDATE_NAMES {
+                    let candidate = base.join(file);
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+        let base = PathBuf::from(manifest_dir).join("bin");
+        let win32 = base.join("win32");
+        for search_dir in [win32, base] {
+            for file in CANDIDATE_NAMES {
+                let candidate = search_dir.join(file);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            for file in CANDIDATE_NAMES {
+                let candidate = parent.join(file);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    if let Ok(path_env) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_env) {
+            for file in CANDIDATE_NAMES {
+                let candidate = dir.join(file);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn helper_checksum_required() -> bool {
+    parse_bool_env("DOCKER_GUI_HELPER_ENFORCE_CHECKSUM").unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn verify_helper_binary_integrity(helper_path: &Path) -> Result<(), String> {
+    let expected = expected_helper_sha256(helper_path);
+    let expected = match expected {
+        Some(value) => value,
+        None => {
+            if helper_checksum_required() {
+                return Err("helper_checksum_missing".to_string());
+            }
+            return Ok(());
+        }
+    };
+
+    let mut file =
+        std::fs::File::open(helper_path).map_err(|e| format!("helper_read_failed:{e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let read = file
+            .read(&mut buf)
+            .map_err(|e| format!("helper_read_failed:{e}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+
+    if actual.eq_ignore_ascii_case(&expected) {
+        Ok(())
+    } else {
+        Err(format!("helper_checksum_mismatch expected={expected} actual={actual}"))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn expected_helper_sha256(helper_path: &Path) -> Option<String> {
+    if let Ok(from_env) = std::env::var("DOCKER_GUI_HELPER_SHA256") {
+        let normalized = normalize_sha256_hex(from_env.trim())?;
+        return Some(normalized);
+    }
+
+    let sidecar_candidates = [
+        helper_path.with_extension("sha256"),
+        helper_path.with_file_name("docker-gui-provisioning-helper.sha256"),
+    ];
+    for candidate in sidecar_candidates {
+        let content = match std::fs::read_to_string(candidate) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        for token in content.split_whitespace() {
+            if let Some(normalized) = normalize_sha256_hex(token) {
+                return Some(normalized);
+            }
+        }
+    }
+    None
+}
+
+fn normalize_sha256_hex(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.len() != 64 || !normalized.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(normalized)
 }
 
 #[derive(Debug)]
@@ -865,9 +1499,19 @@ async fn run_privileged_action(
         }),
     );
 
-    let execution_result = match try_execute_helper_action(action, target) {
+    let execution_result = match try_execute_helper_action(app, action, target) {
         Ok(HelperDispatch::Handled(result)) => Ok(result),
         Ok(HelperDispatch::Fallback { reason }) => {
+            if helper_strict_mode_enabled() {
+                execution_mode = "helper_required_no_fallback";
+                Err(StageFailure {
+                    class: "helper_failed",
+                    message: format!(
+                        "Privileged helper is required but unavailable: {reason}. Install/enable docker-gui-provisioning-helper and retry."
+                    ),
+                    retriable: true,
+                })
+            } else {
             execution_mode = "in_process_fallback";
             emit_engine_event(
                 app,
@@ -880,6 +1524,7 @@ async fn run_privileged_action(
                 }),
             );
             execute_privileged_action(app, action, target).await
+            }
         }
         Err(failure) => Err(failure),
     };
@@ -918,6 +1563,7 @@ async fn run_privileged_action(
 }
 
 fn try_execute_helper_action(
+    app: &AppHandle,
     action: PrivilegedAction,
     target: &Provider,
 ) -> Result<HelperDispatch, StageFailure> {
@@ -931,13 +1577,28 @@ fn try_execute_helper_action(
 
     #[cfg(target_os = "windows")]
     {
+        let helper_path = match resolve_helper_binary_path(Some(app)) {
+            Some(path) => path,
+            None => {
+                return Ok(HelperDispatch::Fallback {
+                    reason: "helper_binary_not_found".to_string(),
+                });
+            }
+        };
+        if let Err(reason) = verify_helper_binary_integrity(&helper_path) {
+            return Ok(HelperDispatch::Fallback {
+                reason: format!("helper_integrity_check_failed:{reason}"),
+            });
+        }
+
         let target_json = serde_json::to_string(target).map_err(|e| StageFailure {
             class: "helper_failed",
             message: format!("Could not serialize helper action payload: {e}"),
             retriable: false,
         })?;
+        let app_data_dir = app_data_dir_for_helper(app)?;
 
-        let output = match std::process::Command::new("docker-gui-provisioning-helper")
+        let output = match std::process::Command::new(&helper_path)
             .args([
                 "run-action",
                 "--action",
@@ -946,6 +1607,8 @@ fn try_execute_helper_action(
                 target.id(),
                 "--target-json",
                 &target_json,
+                "--app-data-dir",
+                &app_data_dir,
             ])
             .output()
         {
@@ -1015,8 +1678,18 @@ fn map_helper_failure_class(class: Option<&str>) -> &'static str {
         "host_not_installed" => "host_not_installed",
         "host_compat_failed" => "host_compat_failed",
         "permission_denied" => "permission_denied",
+        "distro_remove_failed" => "distro_remove_failed",
         _ => "helper_failed",
     }
+}
+
+fn app_data_dir_for_helper(app: &AppHandle) -> Result<String, StageFailure> {
+    let path = app.path().app_data_dir().map_err(|e| StageFailure {
+        class: "helper_failed",
+        message: format!("Could not resolve app data directory for helper: {e}"),
+        retriable: false,
+    })?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 async fn execute_privileged_action(
@@ -1094,6 +1767,14 @@ async fn execute_privileged_action(
                 verify_wsl_engine_socket_ready(&selected_distro)?;
                 ensure_wsl_relay_registration_and_health(app, &selected_distro, relay_pipe).await?;
             }
+            Ok(PrivilegedActionResult {
+                action: action.id().to_string(),
+                status: "succeeded",
+                details: serde_json::json!({}),
+            })
+        }
+        PrivilegedAction::WslManagedDistroRemove => {
+            unregister_managed_wsl_distro()?;
             Ok(PrivilegedActionResult {
                 action: action.id().to_string(),
                 status: "succeeded",
@@ -1393,26 +2074,18 @@ fn discover_preferred_wsl_distro() -> Option<String> {
 
 async fn detect_host_provider(target: &Provider) -> Result<(), StageFailure> {
     match target {
-        Provider::HostEngine { kind, endpoint } => match kind {
-            HostEngineKind::RancherDesktopMoby => Err(StageFailure {
-                class: "host_policy_blocked",
-                message: "Rancher Desktop UI install is disabled by policy. Use an existing compatible Host Engine or WSL Engine."
-                    .to_string(),
-                retriable: false,
-            }),
-            HostEngineKind::ExistingCompatibleHost => {
-                if can_ping(endpoint).await {
-                    Ok(())
-                } else {
-                    Err(StageFailure {
-                        class: "host_not_installed",
-                        message: "No compatible Host Engine was detected. Install or start a compatible host provider, or use WSL Engine."
-                            .to_string(),
-                        retriable: false,
-                    })
-                }
+        Provider::HostEngine { endpoint, .. } => {
+            if can_ping(endpoint).await {
+                Ok(())
+            } else {
+                Err(StageFailure {
+                    class: "host_not_installed",
+                    message: "No compatible Host Engine was detected. Install or start a compatible host provider, or use WSL Engine."
+                        .to_string(),
+                    retriable: false,
+                })
             }
-        },
+        }
         Provider::CustomHost { endpoint } => {
             if can_ping(endpoint).await {
                 Ok(())
@@ -1732,6 +2405,8 @@ docker compose version >/dev/null 2>&1 || docker-compose version >/dev/null 2>&1
 
 #[cfg(target_os = "windows")]
 fn verify_wsl_engine_socket_ready(distro: &str) -> Result<(), StageFailure> {
+    ensure_wsl_engine_runtime_running(distro)?;
+
     let output = std::process::Command::new("wsl")
         .args([
             "-d",
@@ -1758,6 +2433,62 @@ fn verify_wsl_engine_socket_ready(distro: &str) -> Result<(), StageFailure> {
         class: "relay_failed",
         message:
             "WSL engine socket is not ready for relay registration. Select Fix automatically to retry."
+                .to_string(),
+        retriable: true,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_wsl_engine_runtime_running(distro: &str) -> Result<(), StageFailure> {
+    let output = std::process::Command::new("wsl")
+        .args([
+            "-d",
+            distro,
+            "-u",
+            "root",
+            "--",
+            "bash",
+            "-lc",
+            r#"set -e
+service docker start >/dev/null 2>&1 || true
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl start docker >/dev/null 2>&1 || true
+fi
+docker info >/dev/null 2>&1"#,
+        ])
+        .output()
+        .map_err(|e| StageFailure {
+            class: "engine_start_failed",
+            message: format!(
+                "Could not start Docker engine service in WSL distro {distro}: {e}. Select Fix automatically to retry."
+            ),
+            retriable: true,
+        })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+    let combined = format!("{stdout}\n{stderr}");
+
+    if combined.contains("permission denied")
+        || combined.contains("access is denied")
+        || combined.contains("administrator")
+    {
+        return Err(StageFailure {
+            class: "permission_denied",
+            message: "Administrator permissions are required to start Docker service in WSL. Re-run setup with admin rights, then select Fix automatically."
+                .to_string(),
+            retriable: false,
+        });
+    }
+
+    Err(StageFailure {
+        class: "engine_start_failed",
+        message:
+            "Docker engine service in WSL is not running. Select Fix automatically to retry."
                 .to_string(),
         retriable: true,
     })
@@ -1851,6 +2582,21 @@ async fn ensure_wsl_relay_registration_and_health(
         return Ok(());
     }
 
+    let started_relay = start_managed_wsl_relay_process(app, distro, relay_pipe)?;
+    if started_relay {
+        if wait_for_relay_pipe(relay_pipe, 12, 500).await {
+            update_wsl_relay_state(app, distro, relay_pipe, "running", None)?;
+            return Ok(());
+        }
+        update_wsl_relay_state(
+            app,
+            distro,
+            relay_pipe,
+            "degraded",
+            Some("Managed relay start command did not produce a reachable endpoint.".to_string()),
+        )?;
+    }
+
     if let Some(fallback) = windows_fallback_endpoint() {
         if can_ping(&fallback).await {
             update_wsl_relay_state(
@@ -1883,6 +2629,150 @@ fn windows_fallback_endpoint() -> Option<String> {
     } else {
         Some(endpoint)
     }
+}
+
+#[cfg(target_os = "windows")]
+fn start_managed_wsl_relay_process(
+    app: &AppHandle,
+    distro: &str,
+    relay_pipe: &str,
+) -> Result<bool, StageFailure> {
+    let app_data_dir = app.path().app_data_dir().map_err(|e| StageFailure {
+        class: "relay_failed",
+        message: format!("Could not resolve app data directory for relay startup: {e}"),
+        retriable: false,
+    })?;
+    let app_data_dir = app_data_dir.to_string_lossy().to_string();
+
+    if let Some(template) = relay_start_command_template() {
+        let command = render_relay_start_command(&template, distro, relay_pipe, &app_data_dir);
+        let result = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &command,
+            ])
+            .spawn();
+        match result {
+            Ok(_) => return Ok(true),
+            Err(e) => {
+                return Err(StageFailure {
+                    class: "relay_failed",
+                    message: format!(
+                        "Could not start managed relay process with configured command: {e}"
+                    ),
+                    retriable: true,
+                });
+            }
+        }
+    }
+
+    if let Some(helper_binary) = resolve_helper_binary_path(Some(app)) {
+        if let Err(reason) = verify_helper_binary_integrity(&helper_binary) {
+            return Err(StageFailure {
+                class: "relay_failed",
+                message: format!("Built-in helper relay integrity check failed: {reason}"),
+                retriable: false,
+            });
+        }
+        let result = std::process::Command::new(helper_binary)
+            .args([
+                "run-relay",
+                "--distro",
+                distro,
+                "--pipe",
+                relay_pipe,
+                "--app-data-dir",
+                &app_data_dir,
+            ])
+            .spawn();
+        match result {
+            Ok(_) => return Ok(true),
+            Err(e) => {
+                return Err(StageFailure {
+                    class: "relay_failed",
+                    message: format!("Could not start built-in helper relay process: {e}"),
+                    retriable: true,
+                });
+            }
+        }
+    }
+
+    let current_exe = std::env::current_exe().map_err(|e| StageFailure {
+        class: "relay_failed",
+        message: format!("Could not resolve current executable for relay startup: {e}"),
+        retriable: true,
+    })?;
+    if let Some(parent) = current_exe.parent() {
+        for candidate in [
+            "docker-gui-wsl-relay.exe",
+            "docker-gui-wsl-relay",
+            "docker-gui-relay.exe",
+            "docker-gui-relay",
+        ] {
+            let relay_exe = parent.join(candidate);
+            if !relay_exe.exists() {
+                continue;
+            }
+            let result = std::process::Command::new(relay_exe)
+                .args([
+                    "--distro",
+                    distro,
+                    "--pipe",
+                    relay_pipe,
+                    "--app-data-dir",
+                    &app_data_dir,
+                ])
+                .spawn();
+            match result {
+                Ok(_) => return Ok(true),
+                Err(e) => {
+                    return Err(StageFailure {
+                        class: "relay_failed",
+                        message: format!("Could not launch managed relay executable: {e}"),
+                        retriable: true,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+#[cfg(target_os = "windows")]
+fn relay_start_command_template() -> Option<String> {
+    std::env::var("DOCKER_GUI_WSL_RELAY_START_CMD")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+#[cfg(target_os = "windows")]
+fn render_relay_start_command(
+    template: &str,
+    distro: &str,
+    relay_pipe: &str,
+    app_data_dir: &str,
+) -> String {
+    template
+        .replace("{distro}", distro)
+        .replace("{relay_pipe}", relay_pipe)
+        .replace("{app_data_dir}", app_data_dir)
+}
+
+#[cfg(target_os = "windows")]
+async fn wait_for_relay_pipe(relay_pipe: &str, attempts: usize, delay_ms: u64) -> bool {
+    for _ in 0..attempts {
+        if can_ping(relay_pipe).await {
+            return true;
+        }
+        sleep(Duration::from_millis(delay_ms)).await;
+    }
+    false
 }
 
 async fn validate_host_compatibility(endpoint: &str) -> Result<(), StageFailure> {
@@ -1961,6 +2851,68 @@ fn host_compose_available() -> bool {
 }
 
 #[cfg(target_os = "windows")]
+fn unregister_managed_wsl_distro() -> Result<(), StageFailure> {
+    let distros = list_wsl_distros()?;
+    if !distros
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(DEFAULT_WSL_DISTRO))
+    {
+        return Ok(());
+    }
+
+    let output = std::process::Command::new("wsl")
+        .args(["--unregister", DEFAULT_WSL_DISTRO])
+        .output()
+        .map_err(|e| StageFailure {
+            class: "distro_remove_failed",
+            message: format!(
+                "Could not remove the managed WSL engine distro: {e}. Select Remove managed engine again to retry."
+            ),
+            retriable: true,
+        })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+    let combined = format!("{stdout}\n{stderr}");
+
+    if combined.contains("not found")
+        || combined.contains("there is no distribution")
+        || combined.contains("was not found")
+    {
+        return Ok(());
+    }
+
+    if combined.contains("access is denied")
+        || combined.contains("0x80070005")
+        || combined.contains("administrator")
+        || combined.contains("elevation")
+    {
+        return Err(StageFailure {
+            class: "permission_denied",
+            message: "Administrator permissions are required to remove the managed engine distro. Approve the permission prompt and retry."
+                .to_string(),
+            retriable: false,
+        });
+    }
+
+    Err(StageFailure {
+        class: "distro_remove_failed",
+        message: "Managed engine removal did not complete. Select Remove managed engine again to retry."
+            .to_string(),
+        retriable: true,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn unregister_managed_wsl_distro() -> Result<(), StageFailure> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn install_supported_wsl_distro() -> Result<(), StageFailure> {
     let output = std::process::Command::new("wsl")
         .args(["--install", "-d", "Ubuntu"])
@@ -2011,7 +2963,6 @@ fn install_supported_wsl_distro() -> Result<(), StageFailure> {
     })
 }
 
-#[cfg(target_os = "windows")]
 fn is_supported_ubuntu_distro(name: &str) -> bool {
     let normalized = name.to_ascii_lowercase();
     normalized == "ubuntu" || normalized.starts_with("ubuntu-")

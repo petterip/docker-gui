@@ -2,6 +2,12 @@
 
 Implementation checklist: see `docs/plans/windows-engine-provisioning-checklist.md`.
 
+Supporting specs:
+- Bootstrapper/helper state machine: `docs/plans/windows-engine-provisioning-state-machine.md`
+- Provider registry schema: `docs/plans/windows-engine-provider-schema.md`
+- UX copy deck: `docs/plans/windows-engine-ux-copy.md`
+- Windows WSL provisioning CI plan: `docs/ci/windows-wsl-provisioning-ci.md`
+
 ## Objective
 
 Enable the Win64 installer to provision and run a supported local container engine when Docker Desktop is not installed, then connect `docker-gui` automatically.
@@ -17,13 +23,13 @@ Non-negotiable behavior:
 4. Provisioning is idempotent, resumable, and reboot-safe.
 5. If setup cannot complete, app still launches in guided disconnected mode with one-click repair.
 
-## Decision Lock (v1)
+## Decision Lock (v1.1)
 
 Concrete decisions for implementation:
 1. Phase 1 engine install target is **WSL Engine** only.
 2. `Host Engine` in Settings means:
-   - install **Rancher Desktop (Moby mode)** using official distribution channel, or
-   - detect and connect to an already-installed compatible host provider.
+   - detect and connect to an already-installed compatible host provider, or
+   - (Phase 2) configure a lightweight **WSL-host-only Podman API** provider (no desktop UI dependency).
 3. No engine binaries are redistributed inside `docker-gui` installer.
 4. All privileged actions are executed by a signed bootstrapper helper, not by the app process.
 
@@ -32,7 +38,7 @@ Concrete decisions for implementation:
 In scope:
 - Installer-time detection of existing engine/runtime.
 - Guided WSL engine provisioning and first-run auto-connect.
-- Settings-driven install/switch between `WSL Engine` and `Host Engine`.
+- Settings-driven install/switch between `WSL Engine` and existing compatible `Host Engine`.
 - Safe rollback/resume across failure and reboot.
 
 Out of scope (initial release):
@@ -83,7 +89,7 @@ Settings UX (`Settings > Engine`):
 
 Components:
 1. `Installer Bootstrapper` (elevated, signed).
-2. `Provisioning Helper` (elevated child process for repair/install from Settings).
+2. `Provisioning Helper` (elevated child process for repair/install from Settings). Built alongside the app via `pnpm run build:helper`, copied into `src-tauri/bin/<platform>/`, and bundled automatically in Tauri resources so Windows builds always ship the helper without extra setup.
 3. `docker-gui app` (non-elevated).
 
 Rules:
@@ -99,8 +105,8 @@ Provider enum:
 - `Provider::CustomHost` (advanced/manual only)
 
 Where `HostEngine.kind` (v1 allowed values):
-- `rancher_desktop_moby`
 - `existing_compatible_host`
+- `podman_wsl_api` (Phase 2 target, no desktop UI dependency)
 
 Provider responsibilities:
 1. Install (if supported).
@@ -184,7 +190,7 @@ Rollback behavior by stage:
 
 Supported user actions:
 1. `Install WSL Engine`
-2. `Install Host Engine`
+2. `Connect Host Engine`
 3. `Switch active engine`
 4. `Repair active engine`
 5. `Remove managed engine` (explicit destructive action with confirmation)
@@ -196,13 +202,22 @@ Switch rules:
 
 ## Host Engine Plan (Phase 2)
 
-Initial supported host path:
-1. Install Rancher Desktop from official channel (`winget` preferred) with verification.
-2. Configure Moby mode and validate Docker API compatibility.
+Initial supported host paths:
+1. Detect/use existing compatible host providers only (no bundled desktop UI installers).
+2. Add lightweight `podman_wsl_api` path:
+   - install Podman in WSL distro (package manager),
+   - enable `podman system service` Unix socket (socket-activated where available),
+   - relay from managed named pipe to Podman Unix socket,
+   - validate Docker API + compose compatibility gates.
 
 Policy override:
-1. Rancher Desktop UI installation is disabled and must not be implemented in `docker-gui`.
-2. Host Engine flow must only detect/use existing compatible host providers.
+1. Full desktop host manager installs (including Rancher Desktop UI flow) are out of scope and must not be implemented in `docker-gui`.
+2. Host Engine onboarding remains endpoint-first and WSL-host-focused.
+
+Research basis (official docs):
+1. Podman machine/service supports Docker-compatible API clients (`podman system service`), enabling lightweight host API exposure without a desktop manager UI.
+2. Podman compose provider/`podman compose` supports compose workflows for compatibility gating.
+3. Docker Engine install path in Ubuntu/WSL remains standard package-based and non-redistributed.
 
 Compatibility gate before marking host provider healthy:
 1. Containers/images/volumes read-write flows pass.
@@ -286,7 +301,8 @@ Exit criteria:
 ## Milestone 3: Host Engine Support
 
 Deliverables:
-- Rancher Desktop host provider integration
+- existing-host adapter hardening
+- `podman_wsl_api` lightweight host provider integration
 - compatibility tests and repair flow
 
 Exit criteria:
@@ -315,7 +331,9 @@ Manual acceptance:
 
 ## Immediate Next Steps
 
-1. Write bootstrapper/helper state machine spec (states, transitions, checkpoint IDs).
-2. Define provider data schema in backend config.
-3. Draft plain-language UX copy set for install, repair, and switch flows.
-4. Create VM-based CI pipeline for install/reboot/resume/repair scenarios.
+Specs for the previously-blocking items now live in the Supporting specs list above. Implementation teams should use them to:
+
+1. Wire the bootstrapper/helper state machine into the signed helper + installer.
+2. Persist provider data according to the documented schema (including migrations if needed).
+3. Replace placeholder text with the approved UX copy across installer, provisioning progress, failure dialogs, and Settings flows.
+4. Hook the GitHub Actions `windows-wsl-provisioning` workflow to an Azure Windows 11 lab subscription and automate the VM-based CI scenarios.

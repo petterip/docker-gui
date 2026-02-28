@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm start",
     "devUrl": "http://localhost:4200",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build && pnpm run build:helper",
     "frontendDist": "../dist/docker-gui-frontend/browser"
   },
   "app": {
@@ -29,6 +29,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "bin"
+    ],
     "icon": [
       "icons/icon.icns",
       "icons/icon.ico",

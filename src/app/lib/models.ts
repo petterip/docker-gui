@@ -103,6 +103,32 @@ export interface ProvisioningState {
   finished_at: string | null;
 }
 
+export interface WslDistroSelection {
+  selected_distro: string;
+  options: string[];
+  recommended_distro: string | null;
+}
+
+export interface DiagnosticFile {
+  path: string;
+  exists: boolean;
+}
+
+export interface EngineDiagnostics {
+  bootstrapper_log: DiagnosticFile;
+  helper_log: DiagnosticFile;
+  reconnect_log: DiagnosticFile;
+  engine_event_log: DiagnosticFile;
+  relay_registration: DiagnosticFile;
+  relay_state: DiagnosticFile;
+}
+
+export interface EngineDiagnosticsExport {
+  output_path: string;
+  created_at: string;
+  included_files: DiagnosticFile[];
+}
+
 export interface ConnectionGuidance {
   connected: boolean;
   title: string;

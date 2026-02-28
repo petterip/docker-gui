@@ -39,10 +39,22 @@
           <strong>{{ g.title }}</strong>
           <span>{{ g.message }}</span>
         </div>
+        @if (provisioning(); as p) {
+          <div style="margin-top: 8px; font-size: 12px; display: grid; gap: 4px;">
+            <span>Setup status: {{ p.status }}</span>
+            @for (stage of p.stages; track stage.id) {
+              @if (stage.status === 'in_progress' || stage.status === 'failed') {
+                <span>
+                  {{ stage.label }}: {{ stage.status }}@if (stage.status === 'failed' && stage.message) { - {{ stage.message }} }
+                </span>
+              }
+            }
+          </div>
+        }
         <div class="engine-guidance-actions">
           <button class="btn btn-default" [disabled]="guidanceBusy()" (click)="retryConnection()">Retry</button>
           <button class="btn btn-primary" [disabled]="guidanceBusy()" (click)="fixAutomatically()">
-            Fix automatically
+            {{ provisioning()?.status === 'running' ? 'Continue setup' : 'Set up automatically' }}
           </button>
           <button class="btn btn-ghost" [disabled]="guidanceBusy()" (click)="continueLimitedMode()">
             Continue with limited mode

@@ -12,7 +12,7 @@ pub const DEFAULT_WSL_DISTRO: &str = "docker-gui-engine";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostEngineKind {
-    RancherDesktopMoby,
+    #[serde(alias = "rancher_desktop_moby")]
     ExistingCompatibleHost,
 }
 
@@ -54,7 +54,11 @@ impl Provider {
 pub struct EngineConfig {
     pub active_provider: Option<Provider>,
     pub previous_provider: Option<Provider>,
+    #[serde(default)]
+    pub preferred_wsl_distro: Option<String>,
     pub resume_checkpoint: Option<String>,
+    #[serde(default)]
+    pub resume_privileged_allowed: bool,
     pub provisioning: Option<ProvisioningState>,
 }
 
@@ -137,8 +141,29 @@ impl EngineRegistry {
         app: &AppHandle,
         checkpoint: Option<String>,
     ) -> Result<(), AppError> {
+        self.set_resume_checkpoint_with_privilege(app, checkpoint, false)
+            .await
+    }
+
+    pub async fn set_resume_checkpoint_with_privilege(
+        &self,
+        app: &AppHandle,
+        checkpoint: Option<String>,
+        privileged_allowed: bool,
+    ) -> Result<(), AppError> {
         let mut guard = self.0.lock().await;
         guard.resume_checkpoint = checkpoint;
+        guard.resume_privileged_allowed = guard.resume_checkpoint.is_some() && privileged_allowed;
+        flush_atomic(app, &guard)
+    }
+
+    pub async fn set_preferred_wsl_distro(
+        &self,
+        app: &AppHandle,
+        distro: Option<String>,
+    ) -> Result<(), AppError> {
+        let mut guard = self.0.lock().await;
+        guard.preferred_wsl_distro = distro;
         flush_atomic(app, &guard)
     }
 
