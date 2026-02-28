@@ -1,4 +1,4 @@
-<div class="slide-over">
+<div class="slide-over" [class.logs-fullscreen]="activeTab() === 'logs' && isLogsFullscreen()">
   <!-- Header -->
   <div class="slide-over-header">
     <div>
@@ -65,9 +65,15 @@
             <input type="checkbox" [checked]="logStore.autoScroll()" (change)="logStore.autoScroll.set($any($event.target).checked)" />
             Auto-scroll
           </label>
-          <button class="btn btn-ghost" style="font-size: 12px;" (click)="logStore.clear()">Clear</button>
+          <div class="action-group">
+            <button class="btn btn-ghost" style="font-size: 12px;" (click)="copyLogs()">Copy</button>
+            <button class="btn btn-ghost" style="font-size: 12px;" (click)="logStore.clear()">Clear</button>
+            <button class="btn btn-ghost" style="font-size: 12px;" (click)="toggleLogsFullscreen()">
+              {{ isLogsFullscreen() ? 'Exit full screen' : 'Full screen' }}
+            </button>
+          </div>
         </div>
-        <div class="log-viewer">
+        <div class="log-viewer" [style.height]="isLogsFullscreen() ? 'calc(100vh - 190px)' : 'auto'">
           @for (line of logStore.lines(); track $index) {
               <div [class]="'log-line log-' + line.stream">
               <span class="log-src">{{ line.stream }}</span>

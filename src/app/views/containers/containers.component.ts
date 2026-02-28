@@ -1,5 +1,5 @@
 import {
-  Component, computed, inject, OnInit, signal
+  Component, computed, effect, inject, signal
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
@@ -22,6 +22,9 @@ interface ConfirmState {
   name: string;
 }
 
+type ContainerColumn = 'name' | 'image' | 'status' | 'ports' | 'created' | 'actions';
+type ColumnWidths = Record<ContainerColumn, number>;
+
 @Component({
   selector: 'app-containers',
   standalone: true,
@@ -31,11 +34,14 @@ interface ConfirmState {
 export class ContainersComponent {
   private queryClient = injectQueryClient();
   private toast = inject(ToastService);
+  private readonly composeProjectLabel = 'com.docker.compose.project';
+  private readonly widthsStorageKey = 'containers.columnWidths.v1';
 
   filter = signal('');
   showStopped = signal(true);
   confirmState = signal<ConfirmState | null>(null);
   selectedContainerId = signal<string | null>(null);
+  columnWidths = signal<ColumnWidths>(this.loadColumnWidths());
 
   // ── Queries ──────────────────────────────────────────────────────────────
   containers = injectQuery(() => ({
@@ -54,10 +60,34 @@ export class ContainersComponent {
       );
   });
 
+  groupedContainers = computed(() => {
+    const map = new Map<string, ContainerItem[]>();
+    for (const container of this.filteredContainers()) {
+      const project = this.getComposeProject(container);
+      const list = map.get(project) ?? [];
+      list.push(container);
+      map.set(project, list);
+    }
+
+    return Array.from(map.entries())
+      .sort(([a], [b]) => {
+        if (a === 'Standalone') return 1;
+        if (b === 'Standalone') return -1;
+        return a.localeCompare(b);
+      })
+      .map(([project, containers]) => ({ project, containers }));
+  });
+
   selectedContainer = computed(() => {
     const id = this.selectedContainerId();
     return id ? (this.containers.data()?.find(c => c.id === id) ?? null) : null;
   });
+
+  constructor() {
+    effect(() => {
+      localStorage.setItem(this.widthsStorageKey, JSON.stringify(this.columnWidths()));
+    });
+  }
 
   // ── Mutations ────────────────────────────────────────────────────────────
   private invalidateContainers = () =>
@@ -135,6 +165,31 @@ export class ContainersComponent {
   openDetail(id: string): void { this.selectedContainerId.set(id); }
   closeDetail(): void { this.selectedContainerId.set(null); }
 
+  columnWidth(key: ContainerColumn): number {
+    return this.columnWidths()[key];
+  }
+
+  startResize(event: MouseEvent, key: ContainerColumn): void {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = this.columnWidths()[key];
+
+    const onMove = (moveEvent: MouseEvent) => {
+      const delta = moveEvent.clientX - startX;
+      const next = Math.max(90, startWidth + delta);
+      this.columnWidths.update(w => ({ ...w, [key]: next }));
+    };
+
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
   statusClass(state: string): string {
     switch (state) {
       case 'running':    return 'badge badge-running';
@@ -157,5 +212,54 @@ export class ContainersComponent {
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return `${Math.floor(diff / 86400)}d ago`;
+  }
+
+  private loadColumnWidths(): ColumnWidths {
+    const defaults: ColumnWidths = {
+      name: 220,
+      image: 480,
+      status: 130,
+      ports: 320,
+      created: 120,
+      actions: 130,
+    };
+
+    const raw = localStorage.getItem(this.widthsStorageKey);
+    if (!raw) return defaults;
+    try {
+      const parsed = JSON.parse(raw) as Partial<ColumnWidths>;
+      return {
+        name: this.coerceWidth(parsed.name, defaults.name),
+        image: this.coerceWidth(parsed.image, defaults.image),
+        status: this.coerceWidth(parsed.status, defaults.status),
+        ports: this.coerceWidth(parsed.ports, defaults.ports),
+        created: this.coerceWidth(parsed.created, defaults.created),
+        actions: this.coerceWidth(parsed.actions, defaults.actions),
+      };
+    } catch {
+      return defaults;
+    }
+  }
+
+  private coerceWidth(value: number | undefined, fallback: number): number {
+    return typeof value === 'number' && Number.isFinite(value) ? Math.max(90, value) : fallback;
+  }
+
+  private getComposeProject(container: ContainerItem): string {
+    const labels = container.labels ?? {};
+    const direct = labels[this.composeProjectLabel];
+    if (direct) return direct;
+
+    for (const [key, value] of Object.entries(labels)) {
+      if (key.toLowerCase() === this.composeProjectLabel && value) {
+        return value;
+      }
+    }
+
+    // Fallback for compose-like names when labels are missing.
+    // Example: myproj-service-1 -> myproj
+    const match = container.name.match(/^([a-zA-Z0-9._-]+)-[a-zA-Z0-9._-]+-\d+$/);
+    if (match?.[1]) return match[1];
+    return 'Standalone';
   }
 }
