@@ -32,7 +32,8 @@ impl ComposeBinary {
 
 pub struct AppState {
     pub docker: Arc<Mutex<Option<Docker>>>,
-    pub socket_path: String,
+    pub socket_path: Arc<Mutex<String>>,
+    pub preferred_endpoint: Arc<Mutex<Option<String>>>,
     pub compose_binary: ComposeBinary,
 }
 
@@ -42,7 +43,8 @@ impl AppState {
         let docker = connect_docker(&socket_path);
         AppState {
             docker: Arc::new(Mutex::new(docker)),
-            socket_path,
+            socket_path: Arc::new(Mutex::new(socket_path)),
+            preferred_endpoint: Arc::new(Mutex::new(None)),
             compose_binary,
         }
     }
@@ -54,7 +56,8 @@ impl AppState {
                 let compose_binary = resolve_compose_binary();
                 AppState {
                     docker: Arc::new(Mutex::new(docker)),
-                    socket_path,
+                    socket_path: Arc::new(Mutex::new(socket_path)),
+                    preferred_endpoint: Arc::new(Mutex::new(None)),
                     compose_binary,
                 }
             }
@@ -64,7 +67,8 @@ impl AppState {
                 // "reconnect" prompt via check_connection.
                 AppState {
                     docker: Arc::new(Mutex::new(None)),
-                    socket_path: String::new(),
+                    socket_path: Arc::new(Mutex::new(String::new())),
+                    preferred_endpoint: Arc::new(Mutex::new(None)),
                     compose_binary: resolve_compose_binary(),
                 }
             }
@@ -73,24 +77,61 @@ impl AppState {
 
     pub async fn get_docker(&self) -> Result<Docker, AppError> {
         let guard = self.docker.lock().await;
+        let socket_path = self.socket_path.lock().await.clone();
         guard.clone().ok_or_else(|| {
             AppError::SocketNotFound(format!(
                 "Could not connect to Docker at {}",
-                self.socket_path
+                socket_path
             ))
         })
     }
+
+    pub async fn get_socket_path(&self) -> String {
+        self.socket_path.lock().await.clone()
+    }
+
+    pub async fn reconnect(&self) -> Result<(), AppError> {
+        if let Some(preferred) = self.preferred_endpoint.lock().await.clone() {
+            if self.reconnect_with_endpoint(&preferred).await.is_ok() {
+                return Ok(());
+            }
+        }
+
+        let socket_path = resolve_socket_path()?;
+        self.reconnect_with_endpoint(&socket_path).await
+    }
+
+    pub async fn reconnect_with_endpoint(&self, endpoint: &str) -> Result<(), AppError> {
+        let docker = connect_docker(endpoint).ok_or_else(|| {
+            AppError::SocketNotFound(format!("Could not connect to Docker at {}", endpoint))
+        })?;
+
+        docker.ping().await?;
+
+        *self.docker.lock().await = Some(docker);
+        *self.socket_path.lock().await = endpoint.to_string();
+        Ok(())
+    }
+
+    pub async fn set_preferred_endpoint(&self, endpoint: Option<String>) {
+        *self.preferred_endpoint.lock().await = endpoint;
+    }
 }
 
-fn resolve_socket_path() -> Result<String, AppError> {
+pub(crate) fn resolve_socket_path() -> Result<String, AppError> {
     // 1. DOCKER_HOST env var
     if let Ok(host) = std::env::var("DOCKER_HOST") {
-        return Ok(host);
+        if !host.trim().is_empty() {
+            return Ok(host);
+        }
     }
 
     // 2. Platform defaults
     #[cfg(target_os = "windows")]
     {
+        if let Some(ctx_host) = resolve_windows_context_host() {
+            return Ok(ctx_host);
+        }
         return Ok("npipe:////./pipe/docker_engine".to_string());
     }
 
@@ -121,9 +162,17 @@ fn resolve_socket_path() -> Result<String, AppError> {
     }
 }
 
-fn connect_docker(socket_path: &str) -> Option<Docker> {
+pub(crate) fn connect_docker(socket_path: &str) -> Option<Docker> {
     #[cfg(target_os = "windows")]
     {
+        if socket_path.starts_with("npipe://") || socket_path.starts_with("//./pipe/") {
+            return Docker::connect_with_named_pipe(
+                socket_path,
+                30,
+                bollard::API_DEFAULT_VERSION,
+            )
+            .ok();
+        }
         return Docker::connect_with_named_pipe(socket_path, 30, bollard::API_DEFAULT_VERSION).ok();
     }
 
@@ -132,6 +181,39 @@ fn connect_docker(socket_path: &str) -> Option<Docker> {
         let unix_path = socket_path.strip_prefix("unix://").unwrap_or(socket_path);
         return Docker::connect_with_unix(unix_path, 30, bollard::API_DEFAULT_VERSION).ok();
     }
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_context_host() -> Option<String> {
+    let show = std::process::Command::new("docker")
+        .args(["context", "show"])
+        .output()
+        .ok()?;
+    if !show.status.success() {
+        return None;
+    }
+
+    let context = String::from_utf8(show.stdout).ok()?.trim().to_string();
+    if context.is_empty() {
+        return None;
+    }
+
+    let inspect = std::process::Command::new("docker")
+        .args([
+            "context",
+            "inspect",
+            "--format",
+            "{{.Endpoints.docker.Host}}",
+            &context,
+        ])
+        .output()
+        .ok()?;
+    if !inspect.status.success() {
+        return None;
+    }
+
+    let host = String::from_utf8(inspect.stdout).ok()?.trim().to_string();
+    if host.is_empty() { None } else { Some(host) }
 }
 
 fn resolve_compose_binary() -> ComposeBinary {

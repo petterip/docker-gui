@@ -24,5 +24,33 @@ export function errorMessage(e: unknown): string {
     return e.kind;
   }
   if (e instanceof Error) return e.message;
-  return String(e);
+  if (typeof e === 'string') return e;
+
+  if (typeof e === 'object' && e !== null) {
+    const rec = e as Record<string, unknown>;
+    const directMessage = rec['message'];
+    if (typeof directMessage === 'string' && directMessage.trim().length > 0) {
+      return directMessage;
+    }
+
+    const nestedError = rec['error'];
+    if (typeof nestedError === 'string' && nestedError.trim().length > 0) {
+      return nestedError;
+    }
+    if (typeof nestedError === 'object' && nestedError !== null) {
+      const nestedRec = nestedError as Record<string, unknown>;
+      const nestedMessage = nestedRec['message'];
+      if (typeof nestedMessage === 'string' && nestedMessage.trim().length > 0) {
+        return nestedMessage;
+      }
+    }
+
+    try {
+      return JSON.stringify(e);
+    } catch {
+      return 'Unknown error';
+    }
+  }
+
+  return 'Unknown error';
 }

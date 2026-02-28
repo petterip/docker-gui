@@ -30,7 +30,7 @@ case "$cmd" in
     pnpm run build
     ;;
   test)
-    pnpm run test -- --watch=false
+    pnpm run test --watch=false
     ;;
   run-web)
     pnpm run start
@@ -40,7 +40,7 @@ case "$cmd" in
     ;;
   check)
     pnpm run build
-    pnpm run test -- --watch=false
+    pnpm run test --watch=false
     ;;
   *)
     usage

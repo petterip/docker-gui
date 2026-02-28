@@ -256,7 +256,7 @@ pub async fn stack_up(
     let state_ref: &AppState = &state;
     let event = format!("compose-log-{}", id);
     // run_compose blocks; spawn off main async thread
-    let state_socket = state_ref.socket_path.clone();
+    let state_socket = state_ref.get_socket_path().await;
     let binary = state_ref.compose_binary.clone();
     let name = stack.name.clone();
     let file_owned = stack.compose_file.clone();
@@ -292,7 +292,7 @@ pub async fn stack_down(
         .await
         .ok_or_else(|| AppError::StackNotFound(id.clone()))?;
     let binary = state.compose_binary.clone();
-    let socket = state.socket_path.clone();
+    let socket = state.get_socket_path().await;
     let name = stack.name.clone();
     let file = stack.compose_file.clone();
     let event = format!("compose-log-{}", id);
@@ -329,7 +329,7 @@ pub async fn stack_restart(
         .await
         .ok_or_else(|| AppError::StackNotFound(id.clone()))?;
     let binary = state.compose_binary.clone();
-    let socket = state.socket_path.clone();
+    let socket = state.get_socket_path().await;
     let name = stack.name.clone();
     let file = stack.compose_file.clone();
     let event = format!("compose-log-{}", id);
@@ -365,7 +365,7 @@ pub async fn stack_logs(
         .await
         .ok_or_else(|| AppError::StackNotFound(id.clone()))?;
     let binary = state.compose_binary.clone();
-    let socket = state.socket_path.clone();
+    let socket = state.get_socket_path().await;
     let name = stack.name.clone();
     let file = stack.compose_file.clone();
     let event = format!("compose-log-{}", id);

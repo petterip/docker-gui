@@ -371,6 +371,33 @@ html, body { margin: 0; padding: 0; height: 100%; }
   min-height: 0;
 }
 
+.engine-guidance-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, #7a2f2f 18%, var(--bg-surface));
+}
+.engine-guidance-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.engine-guidance-copy strong {
+  font-size: 13px;
+}
+.engine-guidance-copy span {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.engine-guidance-actions {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 /* ===== Status bar ===== */
 .status-bar {
   grid-area: status; display: flex; align-items: center; gap: 6px;

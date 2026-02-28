@@ -1,8 +1,7 @@
 <div class="flex flex-col h-full overflow-auto">
-  <div class="px-6 py-4" style="max-width: 640px;">
+  <div class="px-6 py-4" style="max-width: 700px;">
     <h2 style="font-size: 18px; font-weight: 600; margin-bottom: 20px;">Settings</h2>
 
-    <!-- Appearance -->
     <section class="settings-section">
       <h3 class="settings-heading">Appearance</h3>
       <div class="flex gap-3">
@@ -21,7 +20,142 @@
       </div>
     </section>
 
-    <!-- Connection -->
+    <section class="settings-section">
+      <h3 class="settings-heading">Engine</h3>
+
+      @if (engineError()) {
+        <div style="color: var(--status-error); margin-bottom: 10px;">{{ engineError() }}</div>
+      }
+
+      @if (engine(); as e) {
+        <dl class="detail-grid" style="margin-bottom: 12px;">
+          <dt>Active provider</dt>
+          <dd>
+            @if (e.active_provider_id === 'wsl_engine') {
+              WSL Engine
+            } @else if (e.active_provider_id === 'host_engine') {
+              Host Engine
+            } @else {
+              Not selected
+            }
+          </dd>
+        </dl>
+
+        <div class="flex gap-3" style="margin-bottom: 14px; flex-wrap: wrap;">
+          <button
+            class="btn btn-primary"
+            [disabled]="engineBusy() || provisioning()?.status === 'running'"
+            (click)="installProvider('wsl_engine')"
+          >
+            Install WSL Engine
+          </button>
+          <button
+            class="btn btn-default"
+            [disabled]="engineBusy() || provisioning()?.status === 'running'"
+            (click)="installProvider('host_engine')"
+          >
+            Install Host Engine
+          </button>
+          <button
+            class="btn btn-default"
+            [disabled]="engineBusy() || provisioning()?.status === 'running'"
+            (click)="repairEngine()"
+          >
+            Fix automatically
+          </button>
+          <button
+            class="btn btn-danger"
+            [disabled]="engineBusy() || provisioning()?.status === 'running'"
+            (click)="removeManagedEngine()"
+          >
+            Remove managed engine
+          </button>
+        </div>
+
+        @if (provisioning(); as p) {
+          <div
+            style="
+              border: 1px solid var(--border);
+              border-radius: var(--radius-sm);
+              padding: 10px;
+              margin-bottom: 10px;
+              background: color-mix(in srgb, var(--bg-elevated) 75%, transparent);
+            "
+          >
+            <div class="flex items-center justify-between gap-3" style="margin-bottom: 8px;">
+              <div style="font-weight: 600;">Provisioning</div>
+              <span class="badge" [class]=" 'badge ' + stageBadgeClass(p.status)">
+                {{ p.status }}
+              </span>
+            </div>
+            <div style="display: grid; gap: 6px;">
+              @for (stage of p.stages; track stage.id) {
+                <div class="flex items-center justify-between gap-3" style="font-size: 12px;">
+                  <span>{{ stage.label }}</span>
+                  <span class="badge" [class]=" 'badge ' + stageBadgeClass(stage.status)">
+                    {{ stage.status }}
+                  </span>
+                </div>
+                @if (stage.status === 'failed' && stage.message) {
+                  <div style="font-size: 12px; color: var(--status-error); margin-top: -2px;">
+                    {{ stage.message }}
+                  </div>
+                }
+              }
+            </div>
+            @if (p.status === 'failed') {
+              <div style="margin-top: 10px;">
+                <button class="btn btn-primary" [disabled]="engineBusy()" (click)="retryProvisioning()">
+                  Retry provisioning
+                </button>
+              </div>
+            }
+          </div>
+        }
+
+        @for (provider of e.providers; track provider.id) {
+          <div
+            style="
+              border: 1px solid var(--border);
+              border-radius: var(--radius-sm);
+              padding: 10px;
+              margin-bottom: 8px;
+              background: var(--bg-elevated);
+            "
+          >
+            <div class="flex items-center justify-between gap-4">
+              <div>
+                <div style="font-weight: 600;">{{ provider.label }}</div>
+                <div style="font-size: 12px; color: var(--text-muted);">{{ healthLabel(provider.health) }}</div>
+              </div>
+              <div class="flex gap-2">
+                @if (!provider.active) {
+                  <button
+                    class="btn btn-default"
+                    [disabled]="engineBusy() || provisioning()?.status === 'running'"
+                    (click)="switchProvider(provider.id === 'wsl_engine' ? 'wsl_engine' : 'host_engine')"
+                  >
+                    Switch now
+                  </button>
+                } @else {
+                  <span class="badge badge-running">Active</span>
+                }
+              </div>
+            </div>
+
+            <details style="margin-top: 8px;">
+              <summary style="cursor: pointer; color: var(--text-secondary);">View details</summary>
+              <div style="margin-top: 6px; font-family: monospace; font-size: 12px;">
+                Endpoint: {{ provider.endpoint || 'Not available' }}
+              </div>
+            </details>
+          </div>
+        }
+      } @else {
+        <div style="color: var(--text-muted);">Loading engine status...</div>
+      }
+    </section>
+
     <section class="settings-section">
       <h3 class="settings-heading">Docker Connection</h3>
 
@@ -52,16 +186,15 @@
       </dl>
 
       <button class="btn btn-primary mt-4" [disabled]="loading()" (click)="reconnect()">
-        {{ loading() ? 'Connecting…' : 'Reconnect' }}
+        {{ loading() ? 'Connecting...' : 'Reconnect' }}
       </button>
     </section>
 
-    <!-- Docker info -->
     <section class="settings-section">
       <h3 class="settings-heading">Docker Info</h3>
 
       @if (loading() && !info()) {
-        <div style="color: var(--text-muted);">Loading…</div>
+        <div style="color: var(--text-muted);">Loading...</div>
       } @else if (infoError()) {
         <div style="color: var(--status-error);">{{ infoError() }}</div>
       } @else if (info(); as i) {
@@ -70,7 +203,7 @@
           <dd>{{ i.os }} / {{ i.arch }}</dd>
 
           <dt>Containers</dt>
-          <dd>{{ i.containers }} total — {{ i.containers_running }} running</dd>
+          <dd>{{ i.containers }} total - {{ i.containers_running }} running</dd>
 
           <dt>Images</dt>
           <dd>{{ i.images }}</dd>

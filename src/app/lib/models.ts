@@ -65,6 +65,66 @@ export interface DockerInfo {
   arch: string;
 }
 
+export type EngineHealth = 'ready' | 'needs_repair' | 'not_installed';
+
+export interface EngineProviderStatus {
+  id: 'wsl_engine' | 'host_engine' | 'custom_host' | string;
+  label: string;
+  active: boolean;
+  health: EngineHealth;
+  endpoint: string | null;
+}
+
+export interface EngineStatus {
+  active_provider_id: string | null;
+  providers: EngineProviderStatus[];
+  resume_checkpoint: string | null;
+  provisioning: ProvisioningState | null;
+}
+
+export type ProvisioningRunStatus = 'running' | 'succeeded' | 'failed';
+export type ProvisioningStageStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
+
+export interface ProvisioningStage {
+  id: string;
+  label: string;
+  status: ProvisioningStageStatus;
+  failure_class: string | null;
+  message: string | null;
+}
+
+export interface ProvisioningState {
+  run_id: string;
+  target_provider_id: string;
+  status: ProvisioningRunStatus;
+  stages: ProvisioningStage[];
+  started_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
+export interface ConnectionGuidance {
+  connected: boolean;
+  title: string;
+  message: string;
+  failure_class: string | null;
+  primary_action: string;
+}
+
+export interface PrivilegedActionSpec {
+  id: string;
+  description: string;
+  requires_elevation: boolean;
+}
+
+export interface PrivilegedActionContract {
+  version: string;
+  transport: string;
+  supported_actions: PrivilegedActionSpec[];
+  execution_mode: string;
+  helper_binary: string;
+}
+
 export interface LogLine {
   stream: 'stdout' | 'stderr';
   text: string;

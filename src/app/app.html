@@ -33,6 +33,23 @@
 
   <!-- Main content -->
   <main class="main-content">
+    @if (connection.isDisconnected() && !limitedMode() && guidance(); as g) {
+      <section class="engine-guidance-banner">
+        <div class="engine-guidance-copy">
+          <strong>{{ g.title }}</strong>
+          <span>{{ g.message }}</span>
+        </div>
+        <div class="engine-guidance-actions">
+          <button class="btn btn-default" [disabled]="guidanceBusy()" (click)="retryConnection()">Retry</button>
+          <button class="btn btn-primary" [disabled]="guidanceBusy()" (click)="fixAutomatically()">
+            Fix automatically
+          </button>
+          <button class="btn btn-ghost" [disabled]="guidanceBusy()" (click)="continueLimitedMode()">
+            Continue with limited mode
+          </button>
+        </div>
+      </section>
+    }
     <router-outlet />
   </main>
 

@@ -21,11 +21,12 @@ pub async fn get_docker_info(state: State<'_, AppState>) -> Result<DockerInfo, A
     let docker = state.get_docker().await?;
     let info = docker.info().await?;
     let version = docker.version().await?;
+    let socket_path = state.get_socket_path().await;
 
     Ok(DockerInfo {
         server_version: info.server_version.unwrap_or_default(),
         api_version: version.api_version.unwrap_or_default(),
-        socket_path: state.socket_path.clone(),
+        socket_path,
         containers: info.containers.unwrap_or(0),
         containers_running: info.containers_running.unwrap_or(0),
         images: info.images.unwrap_or(0),
@@ -36,7 +37,12 @@ pub async fn get_docker_info(state: State<'_, AppState>) -> Result<DockerInfo, A
 
 #[tauri::command]
 pub async fn check_connection(state: State<'_, AppState>) -> Result<bool, AppError> {
-    let docker = state.get_docker().await?;
-    docker.ping().await?;
+    if let Ok(docker) = state.get_docker().await {
+        if docker.ping().await.is_ok() {
+            return Ok(true);
+        }
+    }
+
+    state.reconnect().await?;
     Ok(true)
 }
